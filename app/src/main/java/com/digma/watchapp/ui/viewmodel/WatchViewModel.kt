@@ -23,6 +23,7 @@ class WatchViewModel : ViewModel() {
 
     val connectionState: StateFlow<BleConnectionState> = bleManager.connectionState
     val healthMetrics: StateFlow<HealthMetrics> = bleManager.healthMetrics
+    val isSyncing: StateFlow<Boolean> = bleManager.isSyncing
     val isScanning: StateFlow<Boolean> = bleScanner.isScanning
     val discoveredDevices: StateFlow<List<WatchDevice>> = bleScanner.discoveredDevices
     val settings: StateFlow<WatchSettings> = app.settings
@@ -32,6 +33,22 @@ class WatchViewModel : ViewModel() {
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
+
+    fun swapCharacteristics(): Boolean {
+        return bleManager.swapCharacteristics()
+    }
+
+    fun testFindWatchAdor(): Boolean {
+        return bleManager.testFindWatchAdor()
+    }
+
+    fun testFindWatchLefun(): Boolean {
+        return bleManager.testFindWatchLefun()
+    }
+
+    fun testFindWatchPadded(): Boolean {
+        return bleManager.testFindWatchPadded()
+    }
 
     fun clearDiagnosticLogs() {
         bleManager.clearDiagnosticLogs()

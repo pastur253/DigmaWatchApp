@@ -76,6 +76,9 @@ class BleManager(private val context: Context) {
     private val _connectionState = MutableStateFlow<BleConnectionState>(BleConnectionState.Disconnected)
     val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
 
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
     private val _healthMetrics = MutableStateFlow(HealthMetrics())
     val healthMetrics: StateFlow<HealthMetrics> = _healthMetrics.asStateFlow()
 
@@ -226,15 +229,21 @@ class BleManager(private val context: Context) {
 
     fun triggerInitialSync() {
         scope.launch {
-            delay(500)
-            logDiagnostic("Синхронизация времени...")
-            syncTime()
-            delay(500)
-            logDiagnostic("Запрос уровня заряда батареи...")
-            queryBattery()
-            delay(500)
-            logDiagnostic("Запрос данных активности (шаги, калории)...")
-            requestActivity()
+            _isSyncing.value = true
+            try {
+                delay(300)
+                logDiagnostic("Синхронизация времени (мультиформат)...")
+                syncTime()
+                delay(500)
+                logDiagnostic("Запрос уровня заряда батареи...")
+                queryBattery()
+                delay(500)
+                logDiagnostic("Запрос данных активности (шаги, калории)...")
+                requestActivity()
+                delay(1200)
+            } finally {
+                _isSyncing.value = false
+            }
         }
     }
 
@@ -299,7 +308,7 @@ class BleManager(private val context: Context) {
                         (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
                 val isNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
                         (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
-                logDiagnostic("  └─ Char: $cUuid [Write=$isWrite, Notify=$isNotify]")
+                logDiagnostic("  └─ Char: $cUuid [Write=$isWrite, Notify=$isNotify, Props=0x${Integer.toHexString(props)}]")
             }
         }
 
@@ -321,39 +330,13 @@ class BleManager(private val context: Context) {
         }
 
         for (service in nonSigServices) {
-            for (char in service.characteristics) {
-                val u = char.uuid.toString().lowercase()
-                val props = char.properties
-                val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
-                        (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
-                val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
-                        (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
-
-                if (canWrite && writeCharacteristic == null && (u.contains("fff1") || u.contains("1911") || u.contains("fea2") || u.contains("6e400002") || u.contains("ffe1"))) {
-                    writeCharacteristic = char
-                    logDiagnostic("Write char сопоставлен по шаблону: ${char.uuid}")
-                }
-                if (canNotify && notifyCharacteristic == null && (u.contains("fff2") || u.contains("1912") || u.contains("fea1") || u.contains("6e400003") || u.contains("ffe2"))) {
-                    notifyCharacteristic = char
-                    logDiagnostic("Notify char сопоставлен по шаблону: ${char.uuid}")
-                }
-            }
-        }
-
-        if (writeCharacteristic != null && notifyCharacteristic != null) {
-            return
-        }
-
-        // 4. Fallback: inspect custom vendor services by properties
-        for (customService in nonSigServices) {
-            findCharacteristicsInService(customService)
+            findCharacteristicsInService(service)
             if (writeCharacteristic != null && notifyCharacteristic != null) {
-                logDiagnostic("Сервис выбран по характеристикам: ${customService.uuid}")
                 return
             }
         }
 
-        // 5. Ultimate fallback: inspect any service
+        // 4. Ultimate fallback: inspect any service
         if (writeCharacteristic == null || notifyCharacteristic == null) {
             for (service in services) {
                 findCharacteristicsInService(service)
@@ -363,20 +346,57 @@ class BleManager(private val context: Context) {
     }
 
     private fun findCharacteristicsInService(service: BluetoothGattService) {
-        // First pass: match known UUID patterns
-        for (char in service.characteristics) {
-            val u = char.uuid.toString().lowercase()
-            if (writeCharacteristic == null && (u.contains("fff1") || u.contains("1911") || u.contains("fea2") || u.contains("6e400002") || u.contains("ffe1"))) {
-                writeCharacteristic = char
-                logDiagnostic("Найдена целевая Write char: ${char.uuid}")
-            }
-            if (notifyCharacteristic == null && (u.contains("fff2") || u.contains("1912") || u.contains("fea1") || u.contains("6e400003") || (u.contains("ffe1") && writeCharacteristic != char))) {
-                notifyCharacteristic = char
-                logDiagnostic("Найдена целевая Notify char: ${char.uuid}")
+        val sUuid = service.uuid.toString().lowercase()
+
+        // Pass 1: Handle FFF0 service with strict property verification
+        // Standard FFF0 profile: FFF2 is WRITE (TX), FFF1 is NOTIFY (RX)
+        if (sUuid.contains("fff0")) {
+            for (char in service.characteristics) {
+                val u = char.uuid.toString().lowercase()
+                val props = char.properties
+                val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+
+                if (u.contains("fff2") && canWrite && writeCharacteristic == null) {
+                    writeCharacteristic = char
+                    logDiagnostic("Найдена FFF2 [Write TX]: ${char.uuid}")
+                }
+                if (u.contains("fff1") && canNotify && notifyCharacteristic == null) {
+                    notifyCharacteristic = char
+                    logDiagnostic("Найдена FFF1 [Notify RX]: ${char.uuid}")
+                }
             }
         }
 
-        // Second pass: fallback by properties
+        // Pass 2: Match known vendor characteristic patterns with capability checks
+        for (char in service.characteristics) {
+            val u = char.uuid.toString().lowercase()
+            val props = char.properties
+            val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+            val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+
+            // Write targets: FFF2 (standard), 1911 (Telink), 6e400002 (Nordic RX), fea2
+            if (canWrite && writeCharacteristic == null) {
+                if (u.contains("fff2") || u.contains("1911") || u.contains("fea2") || u.contains("6e400002") || u.contains("2d01")) {
+                    writeCharacteristic = char
+                    logDiagnostic("Найдена Write char по шаблону: ${char.uuid}")
+                }
+            }
+
+            // Notify targets: FFF1 (standard), 1912 (Telink), 6e400003 (Nordic TX), fea1
+            if (canNotify && notifyCharacteristic == null && char != writeCharacteristic) {
+                if (u.contains("fff1") || u.contains("1912") || u.contains("fea1") || u.contains("6e400003") || u.contains("2d02")) {
+                    notifyCharacteristic = char
+                    logDiagnostic("Найдена Notify char по шаблону: ${char.uuid}")
+                }
+            }
+        }
+
+        // Pass 3: Fallback strictly by capability (first write-capable, first notify-capable)
         for (char in service.characteristics) {
             val props = char.properties
             val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
@@ -384,12 +404,40 @@ class BleManager(private val context: Context) {
             val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
                     (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
 
-            if (canWrite && writeCharacteristic == null) {
+            if (canWrite && writeCharacteristic == null && char != notifyCharacteristic) {
                 writeCharacteristic = char
+                logDiagnostic("Fallback Write char назначена по свойствам: ${char.uuid}")
             }
-            if (canNotify && notifyCharacteristic == null && (writeCharacteristic != char || service.characteristics.size == 1)) {
+            if (canNotify && notifyCharacteristic == null && char != writeCharacteristic) {
                 notifyCharacteristic = char
+                logDiagnostic("Fallback Notify char назначена по свойствам: ${char.uuid}")
             }
+        }
+    }
+
+    /**
+     * Diagnostic feature: allows swapping write and notify characteristics dynamically
+     * if a non-standard device revision has inverted them.
+     */
+    fun swapCharacteristics(): Boolean {
+        val oldWrite = writeCharacteristic
+        val oldNotify = notifyCharacteristic
+        if (oldWrite == null && oldNotify == null) {
+            logDiagnostic("Сбой swap: характеристики не определены")
+            return false
+        }
+
+        writeCharacteristic = oldNotify
+        notifyCharacteristic = oldWrite
+        logDiagnostic("РУЧНОЙ SWAP ХАРАКТЕРИСТИК:\n  Write (TX) -> ${writeCharacteristic?.uuid}\n  Notify (RX) -> ${notifyCharacteristic?.uuid}")
+
+        val gatt = activeGatt
+        val newNotify = notifyCharacteristic
+        if (gatt != null && newNotify != null) {
+            enableNotification(gatt, newNotify)
+        }
+        return true
+    }
         }
     }
 
@@ -516,11 +564,14 @@ class BleManager(private val context: Context) {
         _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
         val pktA = DigmaProtocolCodec.buildTimeSyncPacket()
         val success = sendPacket(pktA)
-        // Also send Format B (1-byte year) 150ms later for maximum firmware compatibility
+        // Multi-format: send 1-byte year format and 20-byte padded format
         scope.launch {
-            delay(150)
+            delay(120)
             val pktB = DigmaProtocolCodec.buildTimeSyncPacketShort()
             sendPacket(pktB)
+            delay(120)
+            val pktPadded = DigmaProtocolCodec.padToLength(pktA, 20)
+            sendPacket(pktPadded)
         }
         return success
     }
@@ -531,23 +582,78 @@ class BleManager(private val context: Context) {
     }
 
     fun queryBattery(): Boolean {
-        return sendPacket(DigmaProtocolCodec.buildBatteryQueryPacket())
+        val raw = DigmaProtocolCodec.buildBatteryQueryPacket()
+        val success = sendPacket(raw)
+        scope.launch {
+            delay(120)
+            val padded = DigmaProtocolCodec.padToLength(raw, 16)
+            sendPacket(padded)
+        }
+        return success
     }
 
     fun requestActivity(): Boolean {
-        return sendPacket(DigmaProtocolCodec.buildActivityRequestPacket())
+        val raw = DigmaProtocolCodec.buildActivityRequestPacket()
+        val success = sendPacket(raw)
+        scope.launch {
+            delay(120)
+            val padded = DigmaProtocolCodec.padToLength(raw, 16)
+            sendPacket(padded)
+        }
+        return success
     }
 
     fun findWatch(): Boolean {
-        return sendPacket(DigmaProtocolCodec.buildFindWatchPacket())
+        logDiagnostic("Команда: Поиск часов (вибрация)...")
+        val pkt1 = DigmaProtocolCodec.buildFindWatchPacket()
+        val success = sendPacket(pkt1)
+        scope.launch {
+            delay(120)
+            val pkt2 = DigmaProtocolCodec.buildFindWatchPacketLefun()
+            sendPacket(pkt2)
+            delay(120)
+            val pktPadded = DigmaProtocolCodec.padToLength(pkt1, 20)
+            sendPacket(pktPadded)
+        }
+        return success
     }
 
     fun toggleHeartRateMeasurement(start: Boolean): Boolean {
         _healthMetrics.value = _healthMetrics.value.copy(isMeasuringHeartRate = start)
-        return sendPacket(DigmaProtocolCodec.buildHeartRateControlPacket(start))
+        logDiagnostic("Команда: Замер пульса ($start)...")
+        val pkt1 = DigmaProtocolCodec.buildHeartRateControlPacket(start)
+        val success = sendPacket(pkt1)
+        scope.launch {
+            delay(120)
+            val pkt2 = DigmaProtocolCodec.buildHeartRateControlPacketLefun(start)
+            sendPacket(pkt2)
+            delay(120)
+            val pktPadded = DigmaProtocolCodec.padToLength(pkt1, 20)
+            sendPacket(pktPadded)
+        }
+        return success
     }
 
     fun sendNotification(type: DigmaProtocolCodec.NotificationType, title: String, text: String): Boolean {
-        return sendPacket(DigmaProtocolCodec.buildNotificationPacket(type, title, text))
+        logDiagnostic("Команда: Отправка push-уведомления ($type: $title)...")
+        val packet = DigmaProtocolCodec.buildNotificationPacket(type, title, text)
+        return sendPacket(packet)
+    }
+
+    // --- Diagnostic Direct Test Methods ---
+
+    fun testFindWatchAdor(): Boolean {
+        logDiagnostic("ТЕСТ: Find Watch (AdorHealth 0x09 0x01 0x01 0x08)")
+        return sendPacket(DigmaProtocolCodec.buildFindWatchPacket())
+    }
+
+    fun testFindWatchLefun(): Boolean {
+        logDiagnostic("ТЕСТ: Find Watch (Lefun/FT100 0x04 0x09 0x90)")
+        return sendPacket(DigmaProtocolCodec.buildFindWatchPacketLefun())
+    }
+
+    fun testFindWatchPadded(): Boolean {
+        logDiagnostic("ТЕСТ: Find Watch (20-байт фрейм с нулями)")
+        return sendPacket(DigmaProtocolCodec.padToLength(DigmaProtocolCodec.buildFindWatchPacket(), 20))
     }
 }

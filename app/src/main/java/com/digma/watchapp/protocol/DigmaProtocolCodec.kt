@@ -5,6 +5,8 @@ import java.util.Calendar
 object DigmaProtocolCodec {
 
     const val HEADER: Byte = 0xAB.toByte()
+    const val HEADER_TX: Byte = 0xAB.toByte()
+    const val HEADER_RX: Byte = 0x5A.toByte()
 
     const val CMD_TIME_SYNC: Byte = 0x01
     const val CMD_FIND_WATCH: Byte = 0x09
@@ -112,7 +114,17 @@ object DigmaProtocolCodec {
     }
 
     /**
-     * Packet: [0xAB, 0x09, 0x01, 0x01, Checksum]
+     * Pads packet to fixed length (e.g. 16 or 20 bytes) with 0x00 for Telink/BLE FIFO buffer compliance.
+     */
+    fun padToLength(packet: ByteArray, targetLength: Int = 20): ByteArray {
+        if (packet.size >= targetLength) return packet
+        val padded = ByteArray(targetLength)
+        System.arraycopy(packet, 0, padded, 0, packet.size)
+        return padded
+    }
+
+    /**
+     * Packet Format 1 (AdorHealth): [0xAB, 0x09, 0x01, 0x01, Checksum]
      */
     fun buildFindWatchPacket(): ByteArray {
         val packet = ByteArray(5)
@@ -122,6 +134,13 @@ object DigmaProtocolCodec {
         packet[3] = 0x01
         packet[4] = calculateChecksum(packet, 1, 3)
         return packet
+    }
+
+    /**
+     * Packet Format 2 (Lefun/FT100 style): [0xAB, 0x04, 0x09, 0x90]
+     */
+    fun buildFindWatchPacketLefun(): ByteArray {
+        return byteArrayOf(HEADER, 0x04.toByte(), CMD_FIND_WATCH, 0x90.toByte())
     }
 
     /**
@@ -135,6 +154,13 @@ object DigmaProtocolCodec {
         packet[3] = if (start) 0x01 else 0x00
         packet[4] = calculateChecksum(packet, 1, 3)
         return packet
+    }
+
+    /**
+     * Alternate Heart Rate packet (Lefun style): [0xAB, 0x04, 0x31, (1=Start / 0=Stop)]
+     */
+    fun buildHeartRateControlPacketLefun(start: Boolean): ByteArray {
+        return byteArrayOf(HEADER, 0x04.toByte(), CMD_HEART_RATE, if (start) 0x01.toByte() else 0x00.toByte())
     }
 
     /**
@@ -196,61 +222,82 @@ object DigmaProtocolCodec {
         return packet
     }
 
+    private val KNOWN_COMMANDS = setOf(
+        CMD_TIME_SYNC,
+        CMD_FIND_WATCH,
+        CMD_HEART_RATE,
+        CMD_ACTIVITY,
+        CMD_NOTIFICATION,
+        CMD_BATTERY,
+        CMD_WATCH_EVENT
+    )
+
     /**
      * Parses an incoming raw byte packet received from the watch notify characteristic.
+     * Supports both 0xAB (TX/Ack) and 0x5A (RX response from watch) headers,
+     * as well as standard (CMD first) and length-first framing.
      */
     fun parseIncomingPacket(packet: ByteArray): IncomingPacket? {
-        if (packet.size < 4 || packet[0] != HEADER) {
+        if (packet.size < 3) {
             return null
         }
 
-        val cmd = packet[1]
-        val len = packet[2].toInt() and 0xFF
-        if (packet.size < 3 + len) {
+        val header = packet[0]
+        if (header != HEADER_TX && header != HEADER_RX) {
             return null
         }
+
+        // Detect whether CMD is at byte 1 (standard) or byte 2 (length-first)
+        val (cmd, len, dataOffset) = when {
+            packet[1] in KNOWN_COMMANDS -> Triple(packet[1], packet[2].toInt() and 0xFF, 3)
+            packet.size > 2 && packet[2] in KNOWN_COMMANDS -> Triple(packet[2], packet[1].toInt() and 0xFF, 3)
+            else -> Triple(packet[1], packet[2].toInt() and 0xFF, 3)
+        }
+
+        val available = packet.size - dataOffset
 
         return when (cmd) {
             CMD_TIME_SYNC -> IncomingPacket.TimeSyncAck
             CMD_FIND_WATCH -> IncomingPacket.FindWatchAck
             CMD_BATTERY -> {
-                val battery = if (len >= 1) packet[3].toInt() and 0xFF else 0
+                val battery = if (available >= 1) packet[dataOffset].toInt() and 0xFF else 0
                 IncomingPacket.Battery(battery.coerceIn(0, 100))
             }
             CMD_ACTIVITY -> {
-                if (len >= 4) {
-                    val stepsLe = (packet[3].toInt() and 0xFF) or
-                            ((packet[4].toInt() and 0xFF) shl 8) or
-                            ((packet[5].toInt() and 0xFF) shl 16) or
-                            ((packet[6].toInt() and 0xFF) shl 24)
+                if (available >= 4) {
+                    val stepsLe = (packet[dataOffset].toInt() and 0xFF) or
+                            ((packet[dataOffset + 1].toInt() and 0xFF) shl 8) or
+                            ((packet[dataOffset + 2].toInt() and 0xFF) shl 16) or
+                            ((packet[dataOffset + 3].toInt() and 0xFF) shl 24)
 
-                    val stepsBe = ((packet[3].toInt() and 0xFF) shl 24) or
-                            ((packet[4].toInt() and 0xFF) shl 16) or
-                            ((packet[5].toInt() and 0xFF) shl 8) or
-                            (packet[6].toInt() and 0xFF)
+                    val stepsBe = ((packet[dataOffset].toInt() and 0xFF) shl 24) or
+                            ((packet[dataOffset + 1].toInt() and 0xFF) shl 16) or
+                            ((packet[dataOffset + 2].toInt() and 0xFF) shl 8) or
+                            (packet[dataOffset + 3].toInt() and 0xFF)
 
                     val steps = if (stepsBe in 0..500_000 && stepsLe !in 0..500_000) stepsBe else stepsLe
 
-                    val calBe = if (len >= 8) ((packet[7].toInt() and 0xFF) shl 8) or (packet[8].toInt() and 0xFF) else 0
-                    val calLe = if (len >= 8) (packet[7].toInt() and 0xFF) or ((packet[8].toInt() and 0xFF) shl 8) else 0
-                    val cal = if (len >= 8 && packet[7].toInt() == 0) calBe else calLe
+                    val calBe = if (available >= 6) ((packet[dataOffset + 4].toInt() and 0xFF) shl 8) or (packet[dataOffset + 5].toInt() and 0xFF) else 0
+                    val calLe = if (available >= 6) (packet[dataOffset + 4].toInt() and 0xFF) or ((packet[dataOffset + 5].toInt() and 0xFF) shl 8) else 0
+                    val cal = if (available >= 6 && packet[dataOffset + 4].toInt() == 0) calBe else calLe
 
-                    val distBe = if (len >= 12) ((packet[9].toInt() and 0xFF) shl 8) or (packet[10].toInt() and 0xFF) else 0
-                    val distLe = if (len >= 12) (packet[9].toInt() and 0xFF) or ((packet[10].toInt() and 0xFF) shl 8) else 0
-                    val dist = if (len >= 12 && packet[9].toInt() == 0) distBe else distLe
+                    val distBe = if (available >= 8) ((packet[dataOffset + 6].toInt() and 0xFF) shl 8) or (packet[dataOffset + 7].toInt() and 0xFF) else 0
+                    val distLe = if (available >= 8) (packet[dataOffset + 6].toInt() and 0xFF) or ((packet[dataOffset + 7].toInt() and 0xFF) shl 8) else 0
+                    val dist = if (available >= 8 && packet[dataOffset + 6].toInt() == 0) distBe else distLe
 
                     IncomingPacket.Activity(steps, cal, dist)
                 } else {
-                    IncomingPacket.Unknown(cmd, packet.copyOfRange(3, 3 + len))
+                    val copyLen = minOf(len, available)
+                    IncomingPacket.Unknown(cmd, packet.copyOfRange(dataOffset, dataOffset + copyLen))
                 }
             }
             CMD_HEART_RATE -> {
-                val hr = if (len >= 1) packet[3].toInt() and 0xFF else 0
-                val spo2 = if (len >= 2) packet[4].toInt() and 0xFF else 0
+                val hr = if (available >= 1) packet[dataOffset].toInt() and 0xFF else 0
+                val spo2 = if (available >= 2) packet[dataOffset + 1].toInt() and 0xFF else 0
                 IncomingPacket.HeartRate(hr, spo2)
             }
             CMD_WATCH_EVENT -> {
-                val actionCode = if (len >= 1) packet[3].toInt() and 0xFF else 0
+                val actionCode = if (available >= 1) packet[dataOffset].toInt() and 0xFF else 0
                 val action = when (actionCode) {
                     0x01 -> WatchAction.FIND_PHONE
                     0x02 -> WatchAction.MUSIC_PLAY_PAUSE
@@ -262,7 +309,8 @@ object DigmaProtocolCodec {
                 IncomingPacket.WatchEvent(action)
             }
             else -> {
-                IncomingPacket.Unknown(cmd, packet.copyOfRange(3, 3 + len))
+                val copyLen = minOf(len, available)
+                IncomingPacket.Unknown(cmd, packet.copyOfRange(dataOffset, dataOffset + copyLen))
             }
         }
     }

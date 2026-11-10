@@ -124,4 +124,50 @@ class DigmaProtocolCodecTest {
             (event as DigmaProtocolCodec.IncomingPacket.WatchEvent).action
         )
     }
+
+    @Test
+    fun testParseIncomingPacketWithHeader0x5A() {
+        // [0x5A, 0x91, 0x01, 92, Checksum] -> Incoming response from watch with 0x5A header
+        val packet = byteArrayOf(0x5A.toByte(), 0x91.toByte(), 0x01, 92, 0x00)
+        val event = DigmaProtocolCodec.parseIncomingPacket(packet)
+
+        assertNotNull(event)
+        assertTrue(event is DigmaProtocolCodec.IncomingPacket.Battery)
+        assertEquals(92, (event as DigmaProtocolCodec.IncomingPacket.Battery).percent)
+    }
+
+    @Test
+    fun testParseIncomingHeartRateWithHeader0x5A() {
+        // [0x5A, 0x31, 0x02, 72, 99, 0x00]
+        val packet = byteArrayOf(0x5A.toByte(), 0x31, 0x02, 72, 99, 0x00)
+        val event = DigmaProtocolCodec.parseIncomingPacket(packet)
+
+        assertNotNull(event)
+        assertTrue(event is DigmaProtocolCodec.IncomingPacket.HeartRate)
+        val hr = event as DigmaProtocolCodec.IncomingPacket.HeartRate
+        assertEquals(72, hr.heartRateBpm)
+        assertEquals(99, hr.spO2Percent)
+    }
+
+    @Test
+    fun testPadToLength() {
+        val original = byteArrayOf(0xAB.toByte(), 0x09, 0x01, 0x01, 0x08)
+        val padded20 = DigmaProtocolCodec.padToLength(original, 20)
+        assertEquals(20, padded20.size)
+        assertEquals(0xAB.toByte(), padded20[0])
+        assertEquals(0x09.toByte(), padded20[1])
+        assertEquals(0x08.toByte(), padded20[4])
+        assertEquals(0x00.toByte(), padded20[5])
+        assertEquals(0x00.toByte(), padded20[19])
+    }
+
+    @Test
+    fun testBuildFindWatchPacketLefun() {
+        val pkt = DigmaProtocolCodec.buildFindWatchPacketLefun()
+        assertEquals(4, pkt.size)
+        assertEquals(0xAB.toByte(), pkt[0])
+        assertEquals(0x04.toByte(), pkt[1])
+        assertEquals(0x09.toByte(), pkt[2])
+        assertEquals(0x90.toByte(), pkt[3])
+    }
 }

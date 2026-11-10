@@ -286,7 +286,7 @@ fun DiagnosticSection(
             if (isExpanded) {
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Active UUIDs badge
+                // Active UUIDs badge & SWAP button
                 if (writeUuid != null || notifyUuid != null) {
                     Column(
                         modifier = Modifier
@@ -295,23 +295,37 @@ fun DiagnosticSection(
                             .background(MaterialTheme.colorScheme.surface)
                             .padding(8.dp)
                     ) {
-                        Text(
-                            text = "TX (Write):  ${writeUuid ?: "не найдена"}",
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "RX (Notify): ${notifyUuid ?: "не найдена"}",
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "TX (Write):  ${writeUuid ?: "не найдена"}",
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "RX (Notify): ${notifyUuid ?: "не найдена"}",
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.swapCharacteristics() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("Поменять TX ⇄ RX", fontSize = 10.sp, color = PrimaryCyan)
+                            }
+                        }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                // Command buttons row
+                // Command buttons row 1: Primary actions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -335,12 +349,12 @@ fun DiagnosticSection(
                     }
 
                     Button(
-                        onClick = { viewModel.findWatch() },
+                        onClick = { viewModel.requestActivity() },
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
                     ) {
-                        Text("Поиск", fontSize = 11.sp, color = Color.Black)
+                        Text("Шаги", fontSize = 11.sp, color = Color.Black)
                     }
 
                     OutlinedButton(
@@ -367,6 +381,41 @@ fun DiagnosticSection(
                             modifier = Modifier.size(14.dp),
                             tint = MaterialTheme.colorScheme.error
                         )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Command buttons row 2: Targeted vibration protocol tests
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.testFindWatchAdor() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("Вибро Ador", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
+                    Button(
+                        onClick = { viewModel.testFindWatchLefun() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("Вибро Lefun", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
+                    Button(
+                        onClick = { viewModel.testFindWatchPadded() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("Вибро 20B", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
                     }
                 }
 
