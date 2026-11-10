@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Digma Watch</string>
+    <string name="tab_dashboard">Главная</string>
+    <string name="tab_scan">Поиск</string>
+    <string name="tab_history">История</string>
+    <string name="tab_settings">Настройки</string>
+    <string name="status_connected">Подключено</string>
+    <string name="status_connecting">Подключение…</string>
+    <string name="status_disconnected">Отключено</string>
+    <string name="status_syncing">Синхронизация…</string>
+    <string name="action_sync_time">Синхронизировать время</string>
+    <string name="action_find_watch">Найти часы</string>
+    <string name="action_measure_hr">Замер пульса</string>
+    <string name="action_disconnect">Отключить</string>
+    <string name="action_scan">Сканировать</string>
+    <string name="action_stop_scan">Остановить</string>
+</resources>
