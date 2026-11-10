@@ -58,6 +58,10 @@ class WatchViewModel : ViewModel() {
         bleManager.syncTime()
     }
 
+    fun syncAll() {
+        bleManager.syncAll()
+    }
+
     fun queryBattery() {
         bleManager.queryBattery()
     }

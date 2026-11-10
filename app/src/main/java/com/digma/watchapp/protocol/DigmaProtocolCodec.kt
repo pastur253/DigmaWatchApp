@@ -35,6 +35,8 @@ object DigmaProtocolCodec {
         data class Activity(val steps: Int, val calories: Int, val distanceMeters: Int) : IncomingPacket()
         data class HeartRate(val heartRateBpm: Int, val spO2Percent: Int) : IncomingPacket()
         data class WatchEvent(val action: WatchAction) : IncomingPacket()
+        object TimeSyncAck : IncomingPacket()
+        object FindWatchAck : IncomingPacket()
         data class Unknown(val command: Byte, val payload: ByteArray) : IncomingPacket() {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
@@ -80,6 +82,32 @@ object DigmaProtocolCodec {
         packet[8] = (min and 0xFF).toByte()
         packet[9] = (sec and 0xFF).toByte()
         packet[10] = calculateChecksum(packet, 1, 9)
+        return packet
+    }
+
+    /**
+     * Format B (1-byte year offset from 2000):
+     * Packet: [0xAB, 0x01, 0x06, Year%100, Month, Day, Hour, Min, Sec, Checksum]
+     */
+    fun buildTimeSyncPacketShort(calendar: Calendar = Calendar.getInstance()): ByteArray {
+        val year = calendar.get(Calendar.YEAR) % 100
+        val month = calendar.get(Calendar.MONTH) + 1
+        val day = calendar.get(Calendar.DAY_OF_MONTH)
+        val hour = calendar.get(Calendar.HOUR_OF_DAY)
+        val min = calendar.get(Calendar.MINUTE)
+        val sec = calendar.get(Calendar.SECOND)
+
+        val packet = ByteArray(10)
+        packet[0] = HEADER
+        packet[1] = CMD_TIME_SYNC
+        packet[2] = 0x06
+        packet[3] = (year and 0xFF).toByte()
+        packet[4] = (month and 0xFF).toByte()
+        packet[5] = (day and 0xFF).toByte()
+        packet[6] = (hour and 0xFF).toByte()
+        packet[7] = (min and 0xFF).toByte()
+        packet[8] = (sec and 0xFF).toByte()
+        packet[9] = calculateChecksum(packet, 1, 8)
         return packet
     }
 
@@ -183,23 +211,32 @@ object DigmaProtocolCodec {
         }
 
         return when (cmd) {
+            CMD_TIME_SYNC -> IncomingPacket.TimeSyncAck
+            CMD_FIND_WATCH -> IncomingPacket.FindWatchAck
             CMD_BATTERY -> {
                 val battery = if (len >= 1) packet[3].toInt() and 0xFF else 0
                 IncomingPacket.Battery(battery.coerceIn(0, 100))
             }
             CMD_ACTIVITY -> {
                 if (len >= 4) {
-                    val steps = ((packet[3].toInt() and 0xFF) shl 24) or
+                    val stepsLe = (packet[3].toInt() and 0xFF) or
+                            ((packet[4].toInt() and 0xFF) shl 8) or
+                            ((packet[5].toInt() and 0xFF) shl 16) or
+                            ((packet[6].toInt() and 0xFF) shl 24)
+
+                    val stepsBe = ((packet[3].toInt() and 0xFF) shl 24) or
                             ((packet[4].toInt() and 0xFF) shl 16) or
                             ((packet[5].toInt() and 0xFF) shl 8) or
                             (packet[6].toInt() and 0xFF)
 
+                    val steps = if (stepsBe in 0..500_000 && stepsLe !in 0..500_000) stepsBe else stepsLe
+
                     val cal = if (len >= 8) {
-                        ((packet[7].toInt() and 0xFF) shl 8) or (packet[8].toInt() and 0xFF)
+                        (packet[7].toInt() and 0xFF) or ((packet[8].toInt() and 0xFF) shl 8)
                     } else 0
 
                     val dist = if (len >= 12) {
-                        ((packet[9].toInt() and 0xFF) shl 8) or (packet[10].toInt() and 0xFF)
+                        (packet[9].toInt() and 0xFF) or ((packet[10].toInt() and 0xFF) shl 8)
                     } else 0
 
                     IncomingPacket.Activity(steps, cal, dist)
