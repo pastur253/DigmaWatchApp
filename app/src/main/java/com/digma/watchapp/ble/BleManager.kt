@@ -17,6 +17,7 @@ import com.digma.watchapp.model.HealthMetrics
 import com.digma.watchapp.protocol.DigmaProtocolCodec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,6 +25,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 class BleManager(private val context: Context) {
@@ -33,16 +39,20 @@ class BleManager(private val context: Context) {
         private val CLIENT_CHARACTERISTIC_CONFIG: UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        // Standard vendor service & characteristic candidates for Digma / Telink
-        private val CANDIDATE_WRITE_CHARS = listOf(
-            UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb"),
-            UUID.fromString("00010203-0405-0607-0809-0a0b0c0d1911"),
-            UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
+        // Standard Bluetooth SIG services that must NOT be picked as vendor services
+        private val STANDARD_SERVICES_TO_IGNORE = setOf(
+            "00001800-0000-1000-8000-00805f9b34fb", // Generic Access
+            "00001801-0000-1000-8000-00805f9b34fb", // Generic Attribute
+            "0000180a-0000-1000-8000-00805f9b34fb"  // Device Information
         )
-        private val CANDIDATE_NOTIFY_CHARS = listOf(
-            UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb"),
-            UUID.fromString("00010203-0405-0607-0809-0a0b0c0d1912"),
-            UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
+
+        // Known vendor services on Telink / AdorHealth / Smartline watches
+        private val KNOWN_VENDOR_SERVICES = listOf(
+            "0000fff0-0000-1000-8000-00805f9b34fb",
+            "00010203-0405-0607-0809-0a0b0c0d1910",
+            "0000fee7-0000-1000-8000-00805f9b34fb",
+            "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+            "0000ffe0-0000-1000-8000-00805f9b34fb"
         )
     }
 
@@ -51,10 +61,16 @@ class BleManager(private val context: Context) {
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager?.adapter
 
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val writeMutex = Mutex()
 
     private var activeGatt: BluetoothGatt? = null
-    private var writeCharacteristic: BluetoothGattCharacteristic? = null
-    private var notifyCharacteristic: BluetoothGattCharacteristic? = null
+    var writeCharacteristic: BluetoothGattCharacteristic? = null
+        private set
+    var notifyCharacteristic: BluetoothGattCharacteristic? = null
+        private set
+
+    @Volatile
+    private var servicesDiscoveredStarted = false
 
     private val _connectionState = MutableStateFlow<BleConnectionState>(BleConnectionState.Disconnected)
     val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
@@ -65,6 +81,23 @@ class BleManager(private val context: Context) {
     private val _incomingEvents = MutableSharedFlow<DigmaProtocolCodec.IncomingPacket>(extraBufferCapacity = 64)
     val incomingEvents: SharedFlow<DigmaProtocolCodec.IncomingPacket> = _incomingEvents.asSharedFlow()
 
+    private val _diagnosticLogs = MutableStateFlow<List<String>>(emptyList())
+    val diagnosticLogs: StateFlow<List<String>> = _diagnosticLogs.asStateFlow()
+
+    fun logDiagnostic(message: String) {
+        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        val entry = "[$time] $message"
+        Log.d(TAG, entry)
+        val current = _diagnosticLogs.value.toMutableList()
+        current.add(0, entry)
+        if (current.size > 100) current.removeAt(current.size - 1)
+        _diagnosticLogs.value = current
+    }
+
+    fun clearDiagnosticLogs() {
+        _diagnosticLogs.value = emptyList()
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
@@ -72,14 +105,25 @@ class BleManager(private val context: Context) {
             val name = device.name ?: "Digma Smartline D3"
             val address = device.address
 
+            logDiagnostic("onConnectionStateChange: newState=$newState, status=$status")
+
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.d(TAG, "Connected to $address. Discovering services...")
-                    _connectionState.value = BleConnectionState.Connected(address, name)
-                    gatt.discoverServices()
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        _connectionState.value = BleConnectionState.Connecting(address, "$name (поиск сервисов...)")
+                        logDiagnostic("BLE связь установлена. Запуск discoverServices()...")
+                        // Wait a short moment before discovering services (improves stability on Android)
+                        scope.launch {
+                            delay(300)
+                            gatt.discoverServices()
+                        }
+                    } else {
+                        logDiagnostic("Ошибка подключения: status=$status")
+                        disconnect()
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.d(TAG, "Disconnected from $address (status=$status)")
+                    logDiagnostic("Отключено от $address (status=$status)")
                     cleanup()
                     _connectionState.value = BleConnectionState.Disconnected
                 }
@@ -89,26 +133,65 @@ class BleManager(private val context: Context) {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
+            val device = gatt?.device ?: return
+            val name = device.name ?: "Digma Smartline D3"
+            val address = device.address
+
             if (status != BluetoothGatt.GATT_SUCCESS || gatt == null) {
-                Log.e(TAG, "Service discovery failed with status $status")
+                logDiagnostic("Ошибка discoverServices: status=$status")
+                _connectionState.value = BleConnectionState.Error("Ошибка обнаружения сервисов ($status)")
                 return
             }
 
-            resolveCharacteristics(gatt.services)
+            logDiagnostic("Обнаружено сервисов: ${gatt.services.size}")
+            resolveVendorCharacteristics(gatt.services)
 
-            // Request larger MTU
-            gatt.requestMtu(128)
+            val writeChar = writeCharacteristic
+            val notifyChar = notifyCharacteristic
 
-            // Subscribe to notifications
-            notifyCharacteristic?.let { char ->
-                enableNotification(gatt, char)
+            if (writeChar == null) {
+                logDiagnostic("ВНИМАНИЕ: Не найдена характеристика для записи (Write)!")
+            } else {
+                logDiagnostic("Выбрана характеристика Write (TX): ${writeChar.uuid}")
             }
 
-            // Immediately synchronize time upon connection
-            scope.launch {
-                syncTime()
-                queryBattery()
-                requestActivity()
+            if (notifyChar == null) {
+                logDiagnostic("ВНИМАНИЕ: Не найдена характеристика для уведомлений (Notify)!")
+            } else {
+                logDiagnostic("Выбрана характеристика Notify (RX): ${notifyChar.uuid}")
+            }
+
+            // Step 2: Subscribe to notifications via descriptor 0x2902
+            if (notifyChar != null) {
+                logDiagnostic("Подписка на уведомления через дескриптор 0x2902...")
+                enableNotification(gatt, notifyChar)
+            } else {
+                // If no notify char, immediately mark connected and sync
+                _connectionState.value = BleConnectionState.Connected(address, name)
+                triggerInitialSync()
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt?,
+            descriptor: BluetoothGattDescriptor?,
+            status: Int
+        ) {
+            val device = gatt?.device
+            val name = device?.name ?: "Digma Smartline D3"
+            val address = device?.address ?: ""
+
+            logDiagnostic("onDescriptorWrite: status=$status (${if (status == 0) "Успешно" else "Ошибка"})")
+
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                _connectionState.value = BleConnectionState.Connected(address, name)
+                logDiagnostic("Готово! Канал связи открыт. Запуск первичной синхронизации...")
+                triggerInitialSync()
+            } else {
+                logDiagnostic("Сбой записи дескриптора, пробуем начать синхронизацию...")
+                _connectionState.value = BleConnectionState.Connected(address, name)
+                triggerInitialSync()
             }
         }
 
@@ -117,7 +200,7 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            handleIncomingData(value)
+            handleIncomingData(characteristic.uuid, value)
         }
 
         @Deprecated("Deprecated for API 33")
@@ -125,15 +208,33 @@ class BleManager(private val context: Context) {
             gatt: BluetoothGatt?,
             characteristic: BluetoothGattCharacteristic?
         ) {
-            val data = characteristic?.value ?: return
-            handleIncomingData(data)
+            val char = characteristic ?: return
+            val data = char.value ?: return
+            handleIncomingData(char.uuid, data)
+        }
+    }
+
+    private fun triggerInitialSync() {
+        scope.launch {
+            delay(400)
+            logDiagnostic("Синхронизация времени...")
+            syncTime()
+            delay(400)
+            logDiagnostic("Запрос уровня заряда батареи...")
+            queryBattery()
+            delay(400)
+            logDiagnostic("Запрос данных активности (шаги, калории)...")
+            requestActivity()
         }
     }
 
     @SuppressLint("MissingPermission")
     fun connect(address: String) {
         val adapter = bluetoothAdapter ?: return
-        if (!adapter.isEnabled) return
+        if (!adapter.isEnabled) {
+            logDiagnostic("Bluetooth выключен!")
+            return
+        }
 
         val device = try {
             adapter.getRemoteDevice(address)
@@ -144,6 +245,7 @@ class BleManager(private val context: Context) {
 
         disconnect()
         _connectionState.value = BleConnectionState.Connecting(address, device.name ?: "Digma Watch")
+        logDiagnostic("Подключение к $address (${device.name ?: "Unknown"})...")
 
         activeGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -157,11 +259,12 @@ class BleManager(private val context: Context) {
         try {
             activeGatt?.disconnect()
             activeGatt?.close()
-        } catch (e: SecurityException) {
+        } catch (e: Exception) {
             Log.e(TAG, "Error closing GATT", e)
         } finally {
             cleanup()
             _connectionState.value = BleConnectionState.Disconnected
+            logDiagnostic("Отключено.")
         }
     }
 
@@ -171,47 +274,142 @@ class BleManager(private val context: Context) {
         notifyCharacteristic = null
     }
 
-    private fun resolveCharacteristics(services: List<BluetoothGattService>) {
+    private fun resolveVendorCharacteristics(services: List<BluetoothGattService>) {
+        writeCharacteristic = null
+        notifyCharacteristic = null
+
+        // 1. Log all discovered services for diagnosis
         for (service in services) {
+            val sUuid = service.uuid.toString().lowercase()
+            logDiagnostic("Service: $sUuid")
             for (char in service.characteristics) {
-                val uuid = char.uuid
+                val cUuid = char.uuid.toString().lowercase()
                 val props = char.properties
+                val isWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                val isNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+                logDiagnostic("  └─ Char: $cUuid [Write=$isWrite, Notify=$isNotify]")
+            }
+        }
 
-                if (CANDIDATE_WRITE_CHARS.contains(uuid) ||
-                    (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
-                    (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
-                ) {
-                    if (writeCharacteristic == null || CANDIDATE_WRITE_CHARS.contains(uuid)) {
-                        writeCharacteristic = char
-                    }
-                }
-
-                if (CANDIDATE_NOTIFY_CHARS.contains(uuid) ||
-                    (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
-                    (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
-                ) {
-                    if (notifyCharacteristic == null || CANDIDATE_NOTIFY_CHARS.contains(uuid)) {
-                        notifyCharacteristic = char
-                    }
+        // 2. Known vendor UUID patterns (FFF0, Telink SPP, FEE7, etc.)
+        for (knownServiceUuid in KNOWN_VENDOR_SERVICES) {
+            val matchingService = services.firstOrNull { it.uuid.toString().equals(knownServiceUuid, ignoreCase = true) }
+            if (matchingService != null) {
+                logDiagnostic("Найден известный вендорный сервис: ${matchingService.uuid}")
+                findCharacteristicsInService(matchingService)
+                if (writeCharacteristic != null && notifyCharacteristic != null) {
+                    return
                 }
             }
         }
-        Log.d(TAG, "Resolved Write: ${writeCharacteristic?.uuid}, Notify: ${notifyCharacteristic?.uuid}")
+
+        // 3. Search known characteristic prefixes across non-SIG services
+        val nonSigServices = services.filterNot { service ->
+            val u = service.uuid.toString().lowercase()
+            STANDARD_SERVICES_TO_IGNORE.any { u.equals(it, ignoreCase = true) }
+        }
+
+        for (service in nonSigServices) {
+            for (char in service.characteristics) {
+                val u = char.uuid.toString().lowercase()
+                val props = char.properties
+                val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                        (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+
+                if (canWrite && writeCharacteristic == null && (u.contains("fff1") || u.contains("1911") || u.contains("6e400002") || u.contains("ffe1"))) {
+                    writeCharacteristic = char
+                    logDiagnostic("Write char сопоставлен по шаблону: ${char.uuid}")
+                }
+                if (canNotify && notifyCharacteristic == null && (u.contains("fff2") || u.contains("1912") || u.contains("6e400003") || u.contains("ffe2"))) {
+                    notifyCharacteristic = char
+                    logDiagnostic("Notify char сопоставлен по шаблону: ${char.uuid}")
+                }
+            }
+        }
+
+        if (writeCharacteristic != null && notifyCharacteristic != null) {
+            return
+        }
+
+        // 4. Fallback: inspect custom vendor services by properties
+        for (customService in nonSigServices) {
+            findCharacteristicsInService(customService)
+            if (writeCharacteristic != null && notifyCharacteristic != null) {
+                logDiagnostic("Сервис выбран по характеристикам: ${customService.uuid}")
+                return
+            }
+        }
+
+        // 5. Ultimate fallback: inspect any service
+        if (writeCharacteristic == null || notifyCharacteristic == null) {
+            for (service in services) {
+                findCharacteristicsInService(service)
+                if (writeCharacteristic != null && notifyCharacteristic != null) break
+            }
+        }
+    }
+
+    private fun findCharacteristicsInService(service: BluetoothGattService) {
+        for (char in service.characteristics) {
+            val props = char.properties
+            val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+            val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
+
+            if (canWrite && writeCharacteristic == null) {
+                writeCharacteristic = char
+            }
+            if (canNotify && notifyCharacteristic == null && (writeCharacteristic != char || service.characteristics.size == 1)) {
+                notifyCharacteristic = char
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
-        gatt.setCharacteristicNotification(char, true)
+        val success = gatt.setCharacteristicNotification(char, true)
+        logDiagnostic("setCharacteristicNotification: $success")
+
         val descriptor = char.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG)
         if (descriptor != null) {
-            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            gatt.writeDescriptor(descriptor)
+            val isIndicate = (char.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+            descriptor.value = if (isIndicate) {
+                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            } else {
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            }
+            val descWriteSuccess = gatt.writeDescriptor(descriptor)
+            logDiagnostic("writeDescriptor (0x2902): $descWriteSuccess")
+            if (!descWriteSuccess) {
+                logDiagnostic("writeDescriptor вернул false, форсируем подключение...")
+                val device = gatt.device
+                _connectionState.value = BleConnectionState.Connected(device.address, device.name ?: "Digma Watch")
+                triggerInitialSync()
+            }
+        } else {
+            logDiagnostic("Дескриптор 0x2902 не найден на характеристике!")
+            // Direct transition if descriptor absent
+            _connectionState.value = BleConnectionState.Connected(gatt.device.address, gatt.device.name ?: "Digma Watch")
+            triggerInitialSync()
         }
     }
 
-    private fun handleIncomingData(data: ByteArray) {
-        val event = DigmaProtocolCodec.parseIncomingPacket(data) ?: return
-        Log.d(TAG, "Received packet: $event")
+    private fun handleIncomingData(charUuid: UUID, data: ByteArray) {
+        val hexStr = data.joinToString(" ") { String.format("%02X", it) }
+        logDiagnostic("RX [$charUuid]: $hexStr")
+
+        val event = DigmaProtocolCodec.parseIncomingPacket(data)
+        if (event == null) {
+            logDiagnostic("RX: Пакет не распознан протоколом (len=${data.size})")
+            return
+        }
+
+        logDiagnostic("RX Событие: $event")
 
         scope.launch {
             _incomingEvents.emit(event)
@@ -245,20 +443,44 @@ class BleManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun sendPacket(packet: ByteArray): Boolean {
-        val gatt = activeGatt ?: return false
-        val char = writeCharacteristic ?: return false
+        val gatt = activeGatt
+        val char = writeCharacteristic
 
-        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, packet, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == 0
+        if (gatt == null) {
+            logDiagnostic("TX Сбой: GATT не подключен")
+            return false
+        }
+        if (char == null) {
+            logDiagnostic("TX Сбой: writeCharacteristic = null")
+            return false
+        }
+
+        val hexStr = packet.joinToString(" ") { String.format("%02X", it) }
+        logDiagnostic("TX [${char.uuid}]: $hexStr")
+
+        val canWriteNoResp = (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+        char.writeType = if (canWriteNoResp) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         } else {
-            char.value = packet
-            gatt.writeCharacteristic(char)
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, packet, char.writeType) == 0
+            } else {
+                char.value = packet
+                gatt.writeCharacteristic(char)
+            }
+        } catch (e: Exception) {
+            logDiagnostic("TX Исключение: ${e.localizedMessage}")
+            false
         }
     }
 
     fun syncTime(): Boolean {
-        return sendPacket(DigmaProtocolCodec.buildTimeSyncPacket())
+        val pkt = DigmaProtocolCodec.buildTimeSyncPacket()
+        return sendPacket(pkt)
     }
 
     fun queryBattery(): Boolean {

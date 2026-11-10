@@ -26,9 +26,16 @@ class WatchViewModel : ViewModel() {
     val isScanning: StateFlow<Boolean> = bleScanner.isScanning
     val discoveredDevices: StateFlow<List<WatchDevice>> = bleScanner.discoveredDevices
     val settings: StateFlow<WatchSettings> = app.settings
+    val diagnosticLogs: StateFlow<List<String>> = bleManager.diagnosticLogs
+    val activeWriteUuid: String? get() = bleManager.writeCharacteristic?.uuid?.toString()
+    val activeNotifyUuid: String? get() = bleManager.notifyCharacteristic?.uuid?.toString()
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
+
+    fun clearDiagnosticLogs() {
+        bleManager.clearDiagnosticLogs()
+    }
 
     fun startScan() {
         bleScanner.startScan()

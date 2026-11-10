@@ -1,9 +1,11 @@
 package com.digma.watchapp.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,7 +21,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -27,14 +34,21 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -148,53 +162,251 @@ fun ScanScreen(viewModel: WatchViewModel) {
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // --- Device List ---
-        if (devices.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isScanning) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = PrimaryCyan)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Поиск часов в радиусе Bluetooth...",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+        // --- Device List (Flexible Area) ---
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            if (devices.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isScanning) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = PrimaryCyan)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Поиск часов в радиусе Bluetooth...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Default.Bluetooth,
+                                contentDescription = null,
+                                tint = StatusDisconnected,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Нажмите «Поиск», чтобы найти часы",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                } else {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Default.Bluetooth,
-                            contentDescription = null,
-                            tint = StatusDisconnected,
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Нажмите «Поиск», чтобы найти часы",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(devices, key = { it.address }) { device ->
+                        DeviceItemCard(
+                            device = device,
+                            isConnecting = connectionState is BleConnectionState.Connecting &&
+                                    (connectionState as BleConnectionState.Connecting).deviceAddress == device.address,
+                            isConnected = connectionState is BleConnectionState.Connected &&
+                                    (connectionState as BleConnectionState.Connected).deviceAddress == device.address,
+                            onConnectClick = { viewModel.connect(device) }
                         )
                     }
                 }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // --- BLE Diagnostic Console ---
+        DiagnosticSection(viewModel = viewModel)
+    }
+}
+
+@Composable
+fun DiagnosticSection(
+    viewModel: WatchViewModel,
+    modifier: Modifier = Modifier
+) {
+    val logs by viewModel.diagnosticLogs.collectAsState()
+    val writeUuid = viewModel.activeWriteUuid
+    val notifyUuid = viewModel.activeNotifyUuid
+    val clipboardManager = LocalClipboardManager.current
+    var isExpanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Header clickable row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                items(devices, key = { it.address }) { device ->
-                    DeviceItemCard(
-                        device = device,
-                        isConnecting = connectionState is BleConnectionState.Connecting &&
-                                (connectionState as BleConnectionState.Connecting).deviceAddress == device.address,
-                        isConnected = connectionState is BleConnectionState.Connected &&
-                                (connectionState as BleConnectionState.Connected).deviceAddress == device.address,
-                        onConnectClick = { viewModel.connect(device) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Terminal,
+                        contentDescription = null,
+                        tint = PrimaryCyan,
+                        modifier = Modifier.size(20.dp)
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "BLE Диагностика (${logs.size})",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (writeUuid != null) {
+                        Text(
+                            text = "GATT готов",
+                            fontSize = 11.sp,
+                            color = StatusConnected,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Icon(
+                        if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Active UUIDs badge
+                if (writeUuid != null || notifyUuid != null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = "TX (Write):  ${writeUuid ?: "не найдена"}",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "RX (Notify): ${notifyUuid ?: "не найдена"}",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // Command buttons row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.syncTime() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                    ) {
+                        Text("Время", fontSize = 11.sp, color = Color.Black)
+                    }
+
+                    Button(
+                        onClick = { viewModel.queryBattery() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                    ) {
+                        Text("АКБ", fontSize = 11.sp, color = Color.Black)
+                    }
+
+                    Button(
+                        onClick = { viewModel.findWatch() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                    ) {
+                        Text("Поиск", fontSize = 11.sp, color = Color.Black)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(logs.joinToString("\n")))
+                        },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Копировать",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = { viewModel.clearDiagnosticLogs() },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Очистить",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Scrollable log console
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF0F141C))
+                        .padding(8.dp)
+                ) {
+                    if (logs.isEmpty()) {
+                        Text(
+                            text = "Логи пока пусты. Подключитесь к часам.",
+                            fontSize = 11.sp,
+                            color = Color.Gray,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(logs) { entry ->
+                                val textColor = when {
+                                    entry.contains("TX") -> Color(0xFF80DEEA)
+                                    entry.contains("RX") -> Color(0xFFA5D6A7)
+                                    entry.contains("Сбой") || entry.contains("Ошибка") || entry.contains("ВНИМАНИЕ") -> Color(0xFFEF9A9A)
+                                    else -> Color(0xFFCFD8DC)
+                                }
+                                Text(
+                                    text = entry,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = textColor,
+                                    lineHeight = 13.sp
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
