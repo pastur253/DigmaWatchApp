@@ -34,9 +34,12 @@ android {
 
             if (keystoreFile != null && keystoreFile.exists()) {
                 storeFile = keystoreFile
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "digma_release_2026"
-                keyAlias = System.getenv("KEY_ALIAS") ?: "digma-key"
-                keyPassword = System.getenv("KEY_PASSWORD") ?: "digma_release_2026"
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                    ?.takeUnless { it.isBlank() || it == "true" } ?: "digma_release_2026"
+                keyAlias = System.getenv("KEY_ALIAS")
+                    ?.takeUnless { it.isBlank() || it == "true" } ?: "digma-key"
+                keyPassword = System.getenv("KEY_PASSWORD")
+                    ?.takeUnless { it.isBlank() || it == "true" } ?: "digma_release_2026"
             } else {
                 initWith(getByName("debug"))
             }

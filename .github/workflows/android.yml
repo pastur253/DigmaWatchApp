@@ -47,6 +47,7 @@ jobs:
 
       - name: Build Debug and Release APKs
         run: |
+          set -eo pipefail
           ./gradlew assembleDebug assembleRelease test --stacktrace 2>&1 | tee build.log || {
             echo "### Build Failed" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
@@ -56,9 +57,9 @@ jobs:
           }
         env:
           KEYSTORE_PATH: "keystore/release.jks"
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'digma_release_2026' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'digma-key' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'digma_release_2026' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Prepare APK files
         run: |
