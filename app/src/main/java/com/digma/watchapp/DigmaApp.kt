@@ -8,6 +8,7 @@ import android.os.Build
 import com.digma.watchapp.ble.BleManager
 import com.digma.watchapp.ble.BleScanner
 import com.digma.watchapp.model.WatchSettings
+import com.digma.watchapp.update.UpdateManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -25,6 +26,9 @@ class DigmaApp : Application() {
     lateinit var bleScanner: BleScanner
         private set
 
+    lateinit var updateManager: UpdateManager
+        private set
+
     private val _settings = MutableStateFlow(WatchSettings())
     val settings = _settings.asStateFlow()
 
@@ -33,6 +37,7 @@ class DigmaApp : Application() {
         instance = this
         bleManager = BleManager(this)
         bleScanner = BleScanner(this)
+        updateManager = UpdateManager(this)
 
         createNotificationChannels()
     }

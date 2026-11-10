@@ -2,6 +2,7 @@ package com.digma.watchapp.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -18,7 +19,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material3.Button
@@ -34,6 +38,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,12 +50,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.digma.watchapp.ui.theme.PrimaryCyan
 import com.digma.watchapp.ui.viewmodel.WatchViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun SettingsScreen(viewModel: WatchViewModel) {
     val settings by viewModel.settings.collectAsState()
     val context = LocalContext.current
     val scrollState = rememberScrollState()
+
+    val updatePrefs = viewModel.updatePreferences
+    var autoCheckUpdates by remember { mutableStateOf(updatePrefs.autoCheckEnabled) }
 
     Column(
         modifier = Modifier
@@ -205,6 +218,76 @@ fun SettingsScreen(viewModel: WatchViewModel) {
             }
         }
 
+        // --- In-App Updates Card ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = PrimaryCyan)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Обновления приложения",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                SettingSwitchRow(
+                    title = "Автопроверка обновлений",
+                    subtitle = "Проверять новые версии при запуске",
+                    checked = autoCheckUpdates,
+                    onCheckedChange = {
+                        autoCheckUpdates = it
+                        updatePrefs.autoCheckEnabled = it
+                    }
+                )
+
+                val lastCheckText = if (updatePrefs.lastCheckTime > 0) {
+                    val sdf = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
+                    "Последняя проверка: ${sdf.format(Date(updatePrefs.lastCheckTime))}"
+                } else {
+                    "Проверка еще не выполнялась"
+                }
+
+                Text(
+                    text = lastCheckText,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.checkForUpdates(isManual = true) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.Black)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Проверить", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val url = "https://github.com/${updatePrefs.repositoryOwner}/${updatePrefs.repositoryName}/releases"
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.OpenInNew, contentDescription = null, tint = PrimaryCyan)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("GitHub", color = PrimaryCyan)
+                    }
+                }
+            }
+        }
+
         // --- About Section ---
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -224,7 +307,7 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "DigmaWatchApp v0.0.1\nПоддержка часов Digma Smartline D3 (Telink TLSR8251 SoC).\nОткрытая альтернатива удаленному приложению AdorHealth.",
+                    text = "DigmaWatchApp v${viewModel.getCurrentVersionName()}\nПоддержка часов Digma Smartline D3 (Telink TLSR8251 SoC).\nОткрытая альтернатива удаленному приложению AdorHealth.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
