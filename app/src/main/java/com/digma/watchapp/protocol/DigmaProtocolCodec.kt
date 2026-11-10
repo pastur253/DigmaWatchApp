@@ -231,13 +231,13 @@ object DigmaProtocolCodec {
 
                     val steps = if (stepsBe in 0..500_000 && stepsLe !in 0..500_000) stepsBe else stepsLe
 
-                    val cal = if (len >= 8) {
-                        (packet[7].toInt() and 0xFF) or ((packet[8].toInt() and 0xFF) shl 8)
-                    } else 0
+                    val calBe = if (len >= 8) ((packet[7].toInt() and 0xFF) shl 8) or (packet[8].toInt() and 0xFF) else 0
+                    val calLe = if (len >= 8) (packet[7].toInt() and 0xFF) or ((packet[8].toInt() and 0xFF) shl 8) else 0
+                    val cal = if (len >= 8 && packet[7].toInt() == 0) calBe else calLe
 
-                    val dist = if (len >= 12) {
-                        (packet[9].toInt() and 0xFF) or ((packet[10].toInt() and 0xFF) shl 8)
-                    } else 0
+                    val distBe = if (len >= 12) ((packet[9].toInt() and 0xFF) shl 8) or (packet[10].toInt() and 0xFF) else 0
+                    val distLe = if (len >= 12) (packet[9].toInt() and 0xFF) or ((packet[10].toInt() and 0xFF) shl 8) else 0
+                    val dist = if (len >= 12 && packet[9].toInt() == 0) distBe else distLe
 
                     IncomingPacket.Activity(steps, cal, dist)
                 } else {
