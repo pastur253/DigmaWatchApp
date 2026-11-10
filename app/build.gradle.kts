@@ -21,14 +21,39 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            val envPath = System.getenv("KEYSTORE_PATH")
+            val keystoreFile = when {
+                !envPath.isNullOrBlank() && file(envPath).exists() -> file(envPath)
+                !envPath.isNullOrBlank() && rootProject.file(envPath).exists() -> rootProject.file(envPath)
+                file("release.jks").exists() -> file("release.jks")
+                rootProject.file("keystore/release.jks").exists() -> rootProject.file("keystore/release.jks")
+                else -> null
+            }
+
+            if (keystoreFile != null && keystoreFile.exists()) {
+                storeFile = keystoreFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "digma_release_2026"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "digma-key"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "digma_release_2026"
+            } else {
+                initWith(getByName("debug"))
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

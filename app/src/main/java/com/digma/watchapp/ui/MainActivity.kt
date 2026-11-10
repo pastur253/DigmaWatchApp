@@ -92,7 +92,12 @@ class MainActivity : ComponentActivity() {
                     canInstallPackages = viewModel.canRequestPackageInstalls(),
                     onDownload = { releaseInfo -> viewModel.startDownload(releaseInfo) },
                     onCancelDownload = { viewModel.cancelDownload() },
-                    onInstall = { apkFile -> viewModel.installUpdate(apkFile) },
+                    onInstall = { apkFile ->
+                        val result = viewModel.installUpdate(apkFile)
+                        if (result is com.digma.watchapp.update.UpdateInstaller.InstallResult.PermissionRequired) {
+                            requestInstallPermission()
+                        }
+                    },
                     onRequestInstallPermission = { requestInstallPermission() },
                     onDismiss = { ignore ->
                         val remoteVersion = (updateState as? UpdateState.Available)?.releaseInfo?.versionName

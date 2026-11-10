@@ -31,6 +31,20 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Setup Signing Keystore
+        run: |
+          mkdir -p keystore
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Decoding release keystore from GitHub Secret KEYSTORE_BASE64..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > keystore/release.jks
+          elif [ -f "keystore/release.jks" ]; then
+            echo "Using tracked keystore/release.jks from repository..."
+          else
+            echo "No custom keystore found"
+          fi
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
       - name: Build Debug and Release APKs
         run: |
           ./gradlew assembleDebug assembleRelease test --stacktrace 2>&1 | tee build.log || {
@@ -40,6 +54,11 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           }
+        env:
+          KEYSTORE_PATH: "keystore/release.jks"
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'digma_release_2026' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'digma-key' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'digma_release_2026' }}
 
       - name: Prepare APK files
         run: |

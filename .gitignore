@@ -27,6 +27,7 @@ keystore.properties
 keystore_base64.txt
 *.jks
 *.keystore
+!keystore/release.jks
 
 # Android Studio / IntelliJ IDEA
 .idea/

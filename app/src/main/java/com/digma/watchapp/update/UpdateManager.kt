@@ -118,7 +118,11 @@ class UpdateManager(private val context: Context) {
     }
 
     fun installUpdate(apkFile: File): UpdateInstaller.InstallResult {
-        return installer.installApk(apkFile)
+        val result = installer.installApk(apkFile)
+        if (result is UpdateInstaller.InstallResult.Error) {
+            _updateState.value = UpdateState.Error(result.message, isManualCheck = false)
+        }
+        return result
     }
 
     fun requestInstallPermission(activity: Activity, requestCode: Int = 1001) {
