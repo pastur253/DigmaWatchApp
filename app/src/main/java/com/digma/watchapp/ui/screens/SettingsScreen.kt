@@ -224,7 +224,7 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "DigmaWatchApp v1.0.0\nПоддержка часов Digma Smartline D3 (Telink TLSR8251 SoC).\nОткрытая альтернатива удаленному приложению AdorHealth.",
+                    text = "DigmaWatchApp v0.0.1\nПоддержка часов Digma Smartline D3 (Telink TLSR8251 SoC).\nОткрытая альтернатива удаленному приложению AdorHealth.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -34,21 +34,29 @@ jobs:
       - name: Run Unit Tests
         run: ./gradlew test --stacktrace
 
-      - name: Build Debug & Release APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build Debug and Release APK
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
 
-      - name: Upload Debug APK Artifact
+      - name: Prepare APK files
+        run: |
+          mkdir -p release-apks
+          cp app/build/outputs/apk/debug/*.apk release-apks/DigmaWatchApp-debug.apk || true
+          cp app/build/outputs/apk/release/*.apk release-apks/DigmaWatchApp-release.apk || true
+
+      - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DigmaWatchApp-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: DigmaWatchApp-apks
+          path: release-apks/*.apk
 
       - name: Publish GitHub Release (On Tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            app/build/outputs/apk/debug/*.apk
+            release-apks/DigmaWatchApp-release.apk
+            release-apks/DigmaWatchApp-debug.apk
+          name: "Release ${{ github.ref_name }}"
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
