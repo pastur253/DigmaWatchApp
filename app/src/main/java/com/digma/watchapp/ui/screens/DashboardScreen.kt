@@ -250,7 +250,7 @@ fun DashboardScreen(
                         Icon(Icons.Default.Favorite, contentDescription = null, tint = HeartRateRed)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Пульс и Кислород ($SpO_2$)",
+                            text = "Пульс и Кислород (SpO2)",
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 16.sp,
                             color = MaterialTheme.colorScheme.onSurface
