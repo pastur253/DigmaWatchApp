@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -110,6 +111,10 @@ class BleManager(private val context: Context) {
     private var hrFallbackJob: Job? = null
     @Volatile
     private var receivedHrSampleInCurrentSession = false
+    @Volatile
+    private var confirmedThreeByteSportLayout: Boolean? = null
+    @Volatile
+    private var lastStepCounterRefreshMs = 0L
 
     @Volatile
     private var pendingDescriptorWrite: CompletableDeferred<Int>? = null
@@ -383,6 +388,8 @@ class BleManager(private val context: Context) {
         _isSyncing.value = true
         try {
             delay(200)
+            activeGatt?.let { readStandardBatteryIfAvailable(it) }
+            if (gen != connectionGeneration) return
             if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
                 logDiagnostic("SXR: Инициализация канала (AppId, DeviceInfo, Время, Профиль, АКБ, Активность)...")
                 sendPacketsSuspend(
@@ -475,6 +482,8 @@ class BleManager(private val context: Context) {
         hrFallbackJob?.cancel()
         hrFallbackJob = null
         receivedHrSampleInCurrentSession = false
+        confirmedThreeByteSportLayout = null
+        lastStepCounterRefreshMs = 0L
         pendingDescriptorWrite?.cancel()
         pendingDescriptorWrite = null
         pendingCharWrite?.cancel()
@@ -790,10 +799,12 @@ class BleManager(private val context: Context) {
                 if (data != null && data.isNotEmpty()) {
                     val pct = (data[0].toInt() and 0xFF).coerceIn(0, 100)
                     logDiagnostic("SIG Батарея (0x2A19): $pct%")
-                    _healthMetrics.value = _healthMetrics.value.copy(
-                        batteryPercent = pct,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
+                    _healthMetrics.update {
+                        it.copy(
+                            batteryPercent = pct,
+                            lastSyncTimestamp = System.currentTimeMillis()
+                        )
+                    }
                 }
             }
         }
@@ -817,8 +828,15 @@ class BleManager(private val context: Context) {
             return
         }
 
+        if (data.isNotEmpty() && (data[0].toInt() and 0xFF) == SxrKeepFitCodec.CMD_CURRENT_SPORT) {
+            val inferredLayout = SxrKeepFitCodec.detectThreeByteSportLayout(data)
+            if (inferredLayout != null && confirmedThreeByteSportLayout == null) {
+                confirmedThreeByteSportLayout = inferredLayout
+            }
+        }
+
         if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
-            when (val sxr = SxrKeepFitCodec.parseIncomingPacket(data)) {
+            when (val sxr = SxrKeepFitCodec.parseIncomingPacket(data, confirmedThreeByteSportLayout)) {
                 is SxrKeepFitCodec.SxrEvent.BindNotify -> {
                     logDiagnostic("RX SXR Bind: action=${sxr.action}, state=${sxr.state}")
                     val gen = connectionGeneration
@@ -843,7 +861,7 @@ class BleManager(private val context: Context) {
                         _deviceFirmware.value = info
                         logDiagnostic("RX SXR Устройство: $info")
                     }
-                    _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
+                    _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.BandCapabilities -> {
@@ -860,9 +878,19 @@ class BleManager(private val context: Context) {
                     )
                     return
                 }
+                is SxrKeepFitCodec.SxrEvent.StepCounter -> {
+                    handleSxrStepCounter(sxr.cumulativeSteps)
+                    return
+                }
+                is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> {
+                    val sumSteps = sxr.stepSamples.sum()
+                    logDiagnostic("RX SXR Бакеты активности (0x10): +$sumSteps шагов (${sxr.stepSamples.size} мин)")
+                    _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
+                    return
+                }
                 is SxrKeepFitCodec.SxrEvent.CommandAck -> {
                     logDiagnostic(String.format(Locale.US, "RX SXR ACK: 0x%02X", sxr.opcode))
-                    _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
+                    _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.CommandError -> {
@@ -892,12 +920,26 @@ class BleManager(private val context: Context) {
             return
         }
 
-        when (val sxrFallback = SxrKeepFitCodec.parseIncomingPacket(data)) {
+        when (val sxrFallback = SxrKeepFitCodec.parseIncomingPacket(data, confirmedThreeByteSportLayout)) {
             is SxrKeepFitCodec.SxrEvent.Standard -> updateFromStandardPacket(sxrFallback.packet)
             is SxrKeepFitCodec.SxrEvent.SensorSnapshot -> updateFromStandardPacket(
                 DigmaProtocolCodec.IncomingPacket.HeartRate(sxrFallback.heartRateBpm, sxrFallback.spO2Percent)
             )
+            is SxrKeepFitCodec.SxrEvent.StepCounter -> handleSxrStepCounter(sxrFallback.cumulativeSteps)
+            is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> logDiagnostic(
+                "RX SXR Бакеты активности (0x10): +${sxrFallback.stepSamples.sum()} шагов"
+            )
             else -> logDiagnostic("RX: Пакет не распознан протоколом (len=${data.size})")
+        }
+    }
+
+    private fun handleSxrStepCounter(cumulativeSteps: Int) {
+        logDiagnostic("RX SXR Шагомер (0x51): счётчик=$cumulativeSteps")
+        _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
+        val now = System.currentTimeMillis()
+        if (canTransmit() && now - lastStepCounterRefreshMs >= 5_000L) {
+            lastStepCounterRefreshMs = now
+            requestActivity()
         }
     }
 
@@ -906,36 +948,31 @@ class BleManager(private val context: Context) {
             receivedHrSampleInCurrentSession = true
             hrFallbackJob?.cancel()
         }
-        _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        _healthMetrics.update { current ->
+            when (event) {
+                is DigmaProtocolCodec.IncomingPacket.Battery -> current.copy(
+                    batteryPercent = event.percent,
+                    lastSyncTimestamp = now
+                )
+                is DigmaProtocolCodec.IncomingPacket.Activity -> current.copy(
+                    steps = event.steps,
+                    caloriesKcal = event.calories,
+                    distanceMeters = event.distanceMeters,
+                    lastSyncTimestamp = now
+                )
+                is DigmaProtocolCodec.IncomingPacket.HeartRate -> current.copy(
+                    heartRateBpm = if (event.heartRateBpm > 0) event.heartRateBpm else current.heartRateBpm,
+                    spO2Percent = if (event.spO2Percent > 0) event.spO2Percent else current.spO2Percent,
+                    lastSyncTimestamp = now
+                )
+                else -> current.copy(lastSyncTimestamp = now)
+            }
+        }
         logDiagnostic("RX Событие: $event")
 
         scope.launch {
             _incomingEvents.emit(event)
-            when (event) {
-                is DigmaProtocolCodec.IncomingPacket.Battery -> {
-                    _healthMetrics.value = _healthMetrics.value.copy(
-                        batteryPercent = event.percent,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
-                }
-                is DigmaProtocolCodec.IncomingPacket.Activity -> {
-                    _healthMetrics.value = _healthMetrics.value.copy(
-                        steps = event.steps,
-                        caloriesKcal = event.calories,
-                        distanceMeters = event.distanceMeters,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
-                }
-                is DigmaProtocolCodec.IncomingPacket.HeartRate -> {
-                    val current = _healthMetrics.value
-                    _healthMetrics.value = current.copy(
-                        heartRateBpm = if (event.heartRateBpm > 0) event.heartRateBpm else current.heartRateBpm,
-                        spO2Percent = if (event.spO2Percent > 0) event.spO2Percent else current.spO2Percent,
-                        lastSyncTimestamp = System.currentTimeMillis()
-                    )
-                }
-                else -> Unit
-            }
         }
     }
 
@@ -1047,7 +1084,7 @@ class BleManager(private val context: Context) {
 
     fun syncTime(): Boolean {
         if (!canTransmit()) return false
-        _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
+        _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
         val gen = connectionGeneration
         enqueueCommand(gen) {
             if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
@@ -1137,7 +1174,7 @@ class BleManager(private val context: Context) {
         if (!canTransmit()) return false
         hrFallbackJob?.cancel()
         receivedHrSampleInCurrentSession = false
-        _healthMetrics.value = _healthMetrics.value.copy(isMeasuringHeartRate = start)
+        _healthMetrics.update { it.copy(isMeasuringHeartRate = start) }
         logDiagnostic("Команда: Замер пульса ($start)...")
         val gen = connectionGeneration
         if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {

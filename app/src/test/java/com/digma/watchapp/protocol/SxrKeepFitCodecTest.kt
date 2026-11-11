@@ -215,7 +215,7 @@ class SxrKeepFitCodecTest {
             putU32Le(this, 1, 1024)
         }
         assertEquals(
-            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(1024, 0, 0)),
+            SxrKeepFitCodec.SxrEvent.StepCounter(1024),
             SxrKeepFitCodec.parseIncomingPacket(stepPkt)
         )
 
@@ -371,6 +371,68 @@ class SxrKeepFitCodecTest {
             SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(5, 1, 3)),
             SxrKeepFitCodec.parseIncomingPacket(compactPacket)
         )
+
+        // 3-byte packet with aligned distance (256m) AND non-zero trailing telemetry in bytes[14..16]
+        val watchWithTailPacket = byteArrayOf(
+            0x03,
+            0x10, 0x20, 0x30, 0x67,
+            0xF4.toByte(), 0x01, 0x00, // 500 steps
+            0x00, 0x01, 0x00,          // 256m (byte[8] == 0)
+            0x0F, 0x00, 0x00,          // 15 kcal
+            0x0C, 0x00, 0x00,          // trailing telemetry (byte[14] != 0)
+            0x00, 0x00, 0x00
+        )
+        assertEquals(
+            true,
+            SxrKeepFitCodec.detectThreeByteSportLayout(watchWithTailPacket)
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(500, 15, 256)),
+            SxrKeepFitCodec.parseIncomingPacket(watchWithTailPacket)
+        )
+
+        // 3-byte packet with status/duration in byte[13] must not inflate calories by 65536x
+        val watchWithByte13Tail = byteArrayOf(
+            0x03,
+            0x00, 0x00, 0x00, 0x00,
+            0x90.toByte(), 0x01, 0x00, // 400 steps
+            0x2C, 0x01, 0x00,          // 300m
+            0x19, 0x00, 0x04,          // 25 kcal + byte[13]=0x04
+            0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(400, 25, 300)),
+            SxrKeepFitCodec.parseIncomingPacket(watchWithByte13Tail)
+        )
+
+        // Ambiguous distance=256m, calories=0 with preferThreeByteSport=true
+        val ambiguousWatchPacket = byteArrayOf(
+            0x03,
+            0x00, 0x00, 0x00, 0x00,
+            0xFA.toByte(), 0x00, 0x00, // 250 steps
+            0x00, 0x01, 0x00,          // 256m
+            0x00, 0x00, 0x00,          // 0 kcal
+            0x05, 0x00, 0x00,          // tail=5
+            0x00, 0x00, 0x00
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(250, 0, 256)),
+            SxrKeepFitCodec.parseIncomingPacket(ambiguousWatchPacket, preferThreeByteSport = true)
+        )
+
+        // 0x10 Activity history buckets (15x 1-minute samples)
+        val historyPkt = ByteArray(20).apply {
+            this[0] = 0x10
+            putU32Le(this, 1, 1_700_000_000)
+            this[5] = 12
+            this[6] = 18
+            this[19] = 5
+        }
+        val historyEvent = SxrKeepFitCodec.parseIncomingPacket(historyPkt) as SxrKeepFitCodec.SxrEvent.ActivityBuckets
+        assertEquals(1_700_000_000L, historyEvent.baseEpochSeconds)
+        assertEquals(15, historyEvent.stepSamples.size)
+        assertEquals(35, historyEvent.stepSamples.sum())
     }
 
     @Test

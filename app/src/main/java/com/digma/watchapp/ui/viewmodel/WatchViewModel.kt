@@ -125,6 +125,8 @@ class WatchViewModel : ViewModel() {
         app.updateSettings(newSettings)
     }
 
+    fun isNotificationListenerEnabled(): Boolean = app.isNotificationListenerEnabled()
+
     fun sendTestNotification(title: String, message: String) {
         bleManager.sendNotification(
             DigmaProtocolCodec.NotificationType.APP_MESSAGE,

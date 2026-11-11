@@ -84,9 +84,7 @@ class WatchSyncService : Service() {
             while (isActive) {
                 delay(15 * 60 * 1000L)
                 if (bleManager.connectionState.value is BleConnectionState.Connected) {
-                    bleManager.syncTime()
-                    bleManager.queryBattery()
-                    bleManager.requestActivity()
+                    bleManager.syncAll()
                 }
             }
         }

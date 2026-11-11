@@ -88,6 +88,11 @@ object SxrKeepFitCodec {
             val fatigue: Int,
             val stress: Int
         ) : SxrEvent()
+        data class StepCounter(val cumulativeSteps: Int) : SxrEvent()
+        data class ActivityBuckets(
+            val baseEpochSeconds: Long,
+            val stepSamples: List<Int>
+        ) : SxrEvent()
         data class CommandAck(val opcode: Int) : SxrEvent()
         data class CommandError(val opcode: Int) : SxrEvent()
         data class Unknown(val opcode: Int, val payload: ByteArray) : SxrEvent() {
@@ -247,7 +252,10 @@ object SxrKeepFitCodec {
         return frames
     }
 
-    fun parseIncomingPacket(data: ByteArray): SxrEvent {
+    fun parseIncomingPacket(
+        data: ByteArray,
+        preferThreeByteSport: Boolean? = null
+    ): SxrEvent {
         if (data.isEmpty()) return SxrEvent.Unknown(0, data)
         val opcode = data[0].toInt() and 0xFF
         return when (opcode) {
@@ -261,7 +269,8 @@ object SxrKeepFitCodec {
             CMD_HR_COMPLETE,
             CMD_SPO2_COMPLETE,
             CMD_KEEPALIVE -> SxrEvent.CommandAck(opcode)
-            CMD_CURRENT_SPORT -> parseCurrentSport(data)
+            CMD_CURRENT_SPORT -> parseCurrentSport(data, preferThreeByteSport)
+            CMD_ACTIVITY_HISTORY -> parseActivityHistory(data)
             CMD_FIND_WATCH -> SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.FindWatchAck)
             CMD_WATCH_ACTION -> parseWatchAction(data)
             CMD_LOCATION_ACTION -> SxrEvent.Standard(
@@ -282,6 +291,32 @@ object SxrKeepFitCodec {
         }
     }
 
+    /**
+     * Infers whether a `0x03` current-sport frame uses 3-byte `u24le` fields (smartwatches)
+     * vs 4-byte `u32le` fields (rings). Returns `null` when both layouts are plausible.
+     */
+    fun detectThreeByteSportLayout(data: ByteArray): Boolean? {
+        if (data.size < 14 || (data[0].toInt() and 0xFF) != CMD_CURRENT_SPORT) return null
+        if (data.size < 17) return true
+        // In 4-byte ring frames ([5..8], [9..12], [13..16]), data[8] and data[12] are zero
+        // for normal daily values (<16.7M), and data[11] is zero below 65,536m distance.
+        if (data[8].toInt() != 0 || data[12].toInt() != 0) return true
+        val steps3 = u24le(data, 5)
+        if (data[11].toInt() != 0 && steps3 < 40_000) return true
+        val dist4 = u32le(data, 9)
+        if (dist4 >= 65_536L && steps3 < 40_000) return true
+        val cal4 = u32le(data, 13)
+        if (cal4 > 65_535L) return true
+        if (cal4 in 1L..65_535L &&
+            data[11].toInt() == 0 &&
+            data[12].toInt() == 0 &&
+            (data[13].toInt() != 0 || dist4 >= 256L)
+        ) {
+            return false
+        }
+        return null
+    }
+
     /** Parses standard Bluetooth SIG Heart Rate Measurement characteristic (`0x2A37`) frames. */
     fun parseStandardBleHeartRate(data: ByteArray): DigmaProtocolCodec.IncomingPacket.HeartRate? {
         if (data.size < 2) return null
@@ -297,12 +332,21 @@ object SxrKeepFitCodec {
         return DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0)
     }
 
-    private fun parseCurrentSport(data: ByteArray): SxrEvent {
+    private fun parseCurrentSport(
+        data: ByteArray,
+        preferThreeByteSport: Boolean? = null
+    ): SxrEvent {
         if (data.size < 14) return SxrEvent.Unknown(CMD_CURRENT_SPORT, data)
-        val useThreeByteFields = isThreeByteCurrentSport(data)
+        val useThreeByteFields = preferThreeByteSport ?: (detectThreeByteSportLayout(data) != false)
         val steps = if (useThreeByteFields) u24le(data, 5) else u32le(data, 5).toInt()
         val distanceMeters = if (useThreeByteFields) u24le(data, 8) else u32le(data, 9).toInt()
-        val calories = if (useThreeByteFields) u24le(data, 11) else u32le(data, 13).toInt()
+        val rawCalories = if (useThreeByteFields) u24le(data, 11) else u32le(data, 13).toInt()
+        // Daily calories cannot exceed 65,535 kcal; fallback to u16le if byte[13] holds status/duration.
+        val calories = if (useThreeByteFields && rawCalories > 65_535) {
+            u16le(data, 11)
+        } else {
+            rawCalories
+        }
         return SxrEvent.Standard(
             DigmaProtocolCodec.IncomingPacket.Activity(
                 steps = steps,
@@ -312,22 +356,17 @@ object SxrKeepFitCodec {
         )
     }
 
-    private fun isThreeByteCurrentSport(data: ByteArray): Boolean {
-        if (data.size < 17) return true
-        // Smartwatches (e.g. Digma D3L) pack steps/distance/calories as 3-byte u24le at offsets 5, 8, 11,
-        // whereas 4-byte ring frames place u32le at 5, 9, 13 (leaving bytes[8], [12] zero for normal counts).
-        if (data[8].toInt() != 0 || data[12].toInt() != 0) return true
-        if (data[11].toInt() != 0 && u32le(data, 13) == 0L) return true
-        if (u32le(data, 9) >= 65_536L && u32le(data, 13) == 0L) return true
-        return false
+    private fun parseActivityHistory(data: ByteArray): SxrEvent {
+        if (data.size < 20) return SxrEvent.Unknown(CMD_ACTIVITY_HISTORY, data)
+        val baseEpochSeconds = u32le(data, 1)
+        val samples = (5..19).map { data[it].toInt() and 0xFF }
+        return SxrEvent.ActivityBuckets(baseEpochSeconds = baseEpochSeconds, stepSamples = samples)
     }
 
     private fun parseStepCounter(data: ByteArray): SxrEvent {
         if (data.size < 5) return SxrEvent.Unknown(CMD_STEP_COUNTER, data)
         val steps = u32le(data, 1).toInt()
-        return SxrEvent.Standard(
-            DigmaProtocolCodec.IncomingPacket.Activity(steps = steps, calories = 0, distanceMeters = 0)
-        )
+        return SxrEvent.StepCounter(cumulativeSteps = steps)
     }
 
     private fun parseBattery(data: ByteArray): SxrEvent {

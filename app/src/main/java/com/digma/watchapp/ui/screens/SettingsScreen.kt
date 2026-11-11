@@ -18,6 +18,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
@@ -29,13 +32,18 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,9 +54,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import com.digma.watchapp.service.NotificationRelayPolicy
 import com.digma.watchapp.ui.theme.PrimaryCyan
+import com.digma.watchapp.ui.theme.StatusConnected
+import com.digma.watchapp.ui.theme.StatusConnecting
 import com.digma.watchapp.ui.viewmodel.WatchViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -58,10 +73,26 @@ import java.util.Locale
 fun SettingsScreen(viewModel: WatchViewModel) {
     val settings by viewModel.settings.collectAsState()
     val context = LocalContext.current
+    val lifecycleOwner = context as? LifecycleOwner
     val scrollState = rememberScrollState()
 
     val updatePrefs = viewModel.updatePreferences
     var autoCheckUpdates by remember { mutableStateOf(updatePrefs.autoCheckEnabled) }
+    var notificationAccessGranted by remember { mutableStateOf(viewModel.isNotificationListenerEnabled()) }
+    var customPackageInput by remember { mutableStateOf("") }
+
+    DisposableEffect(lifecycleOwner) {
+        val lifecycle = lifecycleOwner?.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationAccessGranted = viewModel.isNotificationListenerEnabled()
+            }
+        }
+        lifecycle?.addObserver(observer)
+        onDispose {
+            lifecycle?.removeObserver(observer)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -86,18 +117,30 @@ fun SettingsScreen(viewModel: WatchViewModel) {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Notifications, contentDescription = null, tint = PrimaryCyan)
+                    Icon(
+                        Icons.Default.Notifications,
+                        contentDescription = null,
+                        tint = if (notificationAccessGranted) StatusConnected else StatusConnecting
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Доступ к уведомлениям",
+                        text = if (notificationAccessGranted) {
+                            "Доступ к уведомлениям выдан"
+                        } else {
+                            "Требуется доступ к уведомлениям"
+                        },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (notificationAccessGranted) StatusConnected else StatusConnecting
                     )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Для пересылки сообщений из мессенджеров на экран часов необходимо разрешить доступ к уведомлениям в системе Android.",
+                    text = if (notificationAccessGranted) {
+                        "Android разрешил чтение уведомлений. Сообщения из мессенджеров будут автоматически пересылаться на часы."
+                    } else {
+                        "Для пересылки сообщений из exteraGram, Telegram и других мессенджеров на экран часов разрешите доступ к уведомлениям в системе Android."
+                    },
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -152,10 +195,140 @@ fun SettingsScreen(viewModel: WatchViewModel) {
 
                     SettingSwitchRow(
                         title = "Мессенджеры и приложения",
-                        subtitle = "Telegram, WhatsApp, VK и др.",
+                        subtitle = "Пересылка сообщений из приложений",
                         checked = settings.forwardApps,
                         onCheckedChange = { viewModel.updateSettings(settings.copy(forwardApps = it)) }
                     )
+
+                    if (settings.forwardApps) {
+                        SettingSwitchRow(
+                            title = "Все приложения и мессенджеры",
+                            subtitle = "exteraGram, Telegram, WhatsApp и любые другие",
+                            checked = settings.forwardAllApps,
+                            onCheckedChange = { viewModel.updateSettings(settings.copy(forwardAllApps = it)) }
+                        )
+
+                        if (!settings.forwardAllApps) {
+                            Text(
+                                text = "Белый список приложений:",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            NotificationRelayPolicy.POPULAR_MESSENGERS.chunked(2).forEach { pair ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    pair.forEach { preset ->
+                                        val selected = settings.allowedPackages.contains(preset.packageName)
+                                        FilterChip(
+                                            selected = selected,
+                                            onClick = {
+                                                val updated = if (selected) {
+                                                    settings.allowedPackages - preset.packageName
+                                                } else {
+                                                    settings.allowedPackages + preset.packageName
+                                                }
+                                                viewModel.updateSettings(settings.copy(allowedPackages = updated))
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = preset.displayName,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            },
+                                            leadingIcon = if (selected) {
+                                                {
+                                                    Icon(
+                                                        Icons.Default.Check,
+                                                        contentDescription = null
+                                                    )
+                                                }
+                                            } else {
+                                                null
+                                            },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = PrimaryCyan.copy(alpha = 0.2f),
+                                                selectedLabelColor = PrimaryCyan,
+                                                selectedLeadingIconColor = PrimaryCyan
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    if (pair.size == 1) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                    }
+                                }
+                            }
+
+                            val presetPackages = NotificationRelayPolicy.POPULAR_MESSENGERS
+                                .map { it.packageName }
+                                .toSet()
+                            val customPackages = settings.allowedPackages
+                                .filter { it !in presetPackages }
+                                .sorted()
+
+                            customPackages.forEach { pkg ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = pkg,
+                                        fontSize = 12.sp,
+                                        color = PrimaryCyan,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            viewModel.updateSettings(
+                                                settings.copy(allowedPackages = settings.allowedPackages - pkg)
+                                            )
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = "Удалить $pkg",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = customPackageInput,
+                                    onValueChange = { customPackageInput = it },
+                                    placeholder = { Text("com.example.messenger", fontSize = 12.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        val pkg = customPackageInput.trim()
+                                        if (pkg.contains(".")) {
+                                            viewModel.updateSettings(
+                                                settings.copy(allowedPackages = settings.allowedPackages + pkg)
+                                            )
+                                            customPackageInput = ""
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = "Добавить пакет", tint = PrimaryCyan)
+                                }
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(6.dp))
 

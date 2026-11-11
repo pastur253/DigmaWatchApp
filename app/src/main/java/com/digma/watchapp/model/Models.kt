@@ -28,13 +28,22 @@ data class WatchSettings(
     val forwardCalls: Boolean = true,
     val forwardSms: Boolean = true,
     val forwardApps: Boolean = true,
-    val allowedPackages: Set<String> = setOf(
-        "org.telegram.messenger",
-        "com.whatsapp",
-        "com.viber.voip",
-        "com.vkontakte.android"
-    )
-)
+    val forwardAllApps: Boolean = true,
+    val allowedPackages: Set<String> = DEFAULT_ALLOWED_PACKAGES
+) {
+    companion object {
+        val DEFAULT_ALLOWED_PACKAGES: Set<String> = setOf(
+            "com.exteragram.messenger",
+            "org.telegram.messenger",
+            "org.telegram.plus",
+            "org.thunderdog.challegram",
+            "com.whatsapp",
+            "com.viber.voip",
+            "com.vkontakte.android",
+            "com.vk.im"
+        )
+    }
+}
 
 data class ActivityHistoryItem(
     val timestamp: Long,
