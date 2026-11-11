@@ -55,7 +55,6 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Run Unit Tests
-        continue-on-error: true
         run: |
           ./gradlew test --stacktrace
 
