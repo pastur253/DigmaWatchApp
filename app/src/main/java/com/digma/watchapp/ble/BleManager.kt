@@ -438,8 +438,6 @@ class BleManager(private val context: Context) {
         }
         return true
     }
-        }
-    }
 
     @SuppressLint("MissingPermission")
     private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {

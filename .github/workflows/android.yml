@@ -77,7 +77,6 @@ jobs:
         with:
           files: |
             release-apks/DigmaWatchApp-release.apk
-            release-apks/DigmaWatchApp-debug.apk
           name: "Release ${{ github.ref_name }}"
           generate_release_notes: true
         env:
