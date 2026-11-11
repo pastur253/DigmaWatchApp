@@ -59,6 +59,10 @@ class BleManager(private val context: Context) {
             UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
         private val BATTERY_LEVEL_CHAR_UUID: UUID =
             UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
+        private val HEART_RATE_SERVICE_UUID: UUID =
+            UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
+        private val HEART_RATE_MEASUREMENT_CHAR_UUID: UUID =
+            UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
 
         // Standard Bluetooth SIG services that must NOT be picked as vendor services
         private fun isStandardSigService(uuid: UUID): Boolean {
@@ -94,13 +98,18 @@ class BleManager(private val context: Context) {
         private set
     var notifyCharacteristic: BluetoothGattCharacteristic? = null
         private set
+    private var rawNotifyCharacteristic: BluetoothGattCharacteristic? = null
     private var standardBatteryCharacteristic: BluetoothGattCharacteristic? = null
+    private var standardHeartRateCharacteristic: BluetoothGattCharacteristic? = null
 
     @Volatile
     private var connectionGeneration = 0L
 
     private var setupJob: Job? = null
     private var keepaliveJob: Job? = null
+    private var hrFallbackJob: Job? = null
+    @Volatile
+    private var receivedHrSampleInCurrentSession = false
 
     @Volatile
     private var pendingDescriptorWrite: CompletableDeferred<Int>? = null
@@ -267,6 +276,23 @@ class BleManager(private val context: Context) {
                 if (notifyChar != null) {
                     logDiagnostic("Подписка на уведомления через дескриптор 0x2902...")
                     enableNotificationSuspend(gatt, notifyChar)
+                }
+
+                val rawNotifyChar = rawNotifyCharacteristic
+                if (rawNotifyChar != null && rawNotifyChar != notifyChar &&
+                    gen == connectionGeneration && activeGatt === gatt
+                ) {
+                    logDiagnostic("Подписка на доп. канал SXR 33F6...")
+                    enableNotificationSuspend(gatt, rawNotifyChar)
+                }
+
+                val standardHrChar = standardHeartRateCharacteristic
+                if (standardHrChar != null && standardHrChar != notifyChar &&
+                    standardHrChar != rawNotifyChar &&
+                    gen == connectionGeneration && activeGatt === gatt
+                ) {
+                    logDiagnostic("Подписка на стандартный BLE HR (0x2A37)...")
+                    enableNotificationSuspend(gatt, standardHrChar)
                 }
 
                 if (gen != connectionGeneration || activeGatt !== gatt) return@launch
@@ -446,6 +472,9 @@ class BleManager(private val context: Context) {
         setupJob = null
         keepaliveJob?.cancel()
         keepaliveJob = null
+        hrFallbackJob?.cancel()
+        hrFallbackJob = null
+        receivedHrSampleInCurrentSession = false
         pendingDescriptorWrite?.cancel()
         pendingDescriptorWrite = null
         pendingCharWrite?.cancel()
@@ -455,7 +484,9 @@ class BleManager(private val context: Context) {
         activeGatt = null
         writeCharacteristic = null
         notifyCharacteristic = null
+        rawNotifyCharacteristic = null
         standardBatteryCharacteristic = null
+        standardHeartRateCharacteristic = null
         _activeWriteUuid.value = null
         _activeNotifyUuid.value = null
         _deviceFirmware.value = null
@@ -464,7 +495,9 @@ class BleManager(private val context: Context) {
     private fun resolveVendorCharacteristics(services: List<BluetoothGattService>) {
         writeCharacteristic = null
         notifyCharacteristic = null
+        rawNotifyCharacteristic = null
         standardBatteryCharacteristic = null
+        standardHeartRateCharacteristic = null
 
         val summaryLines = mutableListOf<String>()
         var hasSxr56ff = false
@@ -492,6 +525,12 @@ class BleManager(private val context: Context) {
                     (props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
                 val isRead = (props and BluetoothGattCharacteristic.PROPERTY_READ != 0)
                 val hasCccd = char.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG) != null
+                if (service.uuid == HEART_RATE_SERVICE_UUID && char.uuid == HEART_RATE_MEASUREMENT_CHAR_UUID && isNotify) {
+                    standardHeartRateCharacteristic = char
+                }
+                if (char.uuid == SxrKeepFitCodec.RAW_NOTIFY_CHAR_UUID && isNotify) {
+                    rawNotifyCharacteristic = char
+                }
                 val line = "  └─ Char: $cUuid [W=$isWrite, N=$isNotify, R=$isRead, CCCD=$hasCccd, Props=0x${Integer.toHexString(props)}]"
                 summaryLines += line
                 logDiagnostic(line)
@@ -770,6 +809,14 @@ class BleManager(private val context: Context) {
             return
         }
 
+        if (charUuid == HEART_RATE_MEASUREMENT_CHAR_UUID) {
+            val hr = SxrKeepFitCodec.parseStandardBleHeartRate(data)
+            if (hr != null) {
+                updateFromStandardPacket(hr)
+            }
+            return
+        }
+
         if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
             when (val sxr = SxrKeepFitCodec.parseIncomingPacket(data)) {
                 is SxrKeepFitCodec.SxrEvent.BindNotify -> {
@@ -855,6 +902,10 @@ class BleManager(private val context: Context) {
     }
 
     private fun updateFromStandardPacket(event: DigmaProtocolCodec.IncomingPacket) {
+        if (event is DigmaProtocolCodec.IncomingPacket.HeartRate && event.heartRateBpm > 0) {
+            receivedHrSampleInCurrentSession = true
+            hrFallbackJob?.cancel()
+        }
         _healthMetrics.value = _healthMetrics.value.copy(lastSyncTimestamp = System.currentTimeMillis())
         logDiagnostic("RX Событие: $event")
 
@@ -1084,18 +1135,30 @@ class BleManager(private val context: Context) {
 
     fun toggleHeartRateMeasurement(start: Boolean): Boolean {
         if (!canTransmit()) return false
+        hrFallbackJob?.cancel()
+        receivedHrSampleInCurrentSession = false
         _healthMetrics.value = _healthMetrics.value.copy(isMeasuringHeartRate = start)
         logDiagnostic("Команда: Замер пульса ($start)...")
         val gen = connectionGeneration
-        enqueueCommand(gen) {
-            if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
-                val pkt = if (start) {
-                    SxrKeepFitCodec.buildHeartRateStartPacket()
-                } else {
-                    SxrKeepFitCodec.buildHeartRateStopPacket()
+        if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
+            if (start) {
+                enqueueCommand(gen) {
+                    sendPacketsSuspend(listOf(SxrKeepFitCodec.buildHeartRateStartPacket()), delayBetweenMs = 0L)
                 }
-                sendPacketsSuspend(listOf(pkt), delayBetweenMs = 0L)
+                startHeartRateFallbackSequence(gen)
             } else {
+                enqueueCommand(gen) {
+                    sendPacketsSuspend(
+                        listOf(
+                            SxrKeepFitCodec.buildHeartRateStopPacket(),
+                            SxrKeepFitCodec.buildCombinedMeasurementStopPacket()
+                        ),
+                        delayBetweenMs = 80L
+                    )
+                }
+            }
+        } else {
+            enqueueCommand(gen) {
                 val pkt1 = DigmaProtocolCodec.buildHeartRateControlPacket(start)
                 val pkt2 = DigmaProtocolCodec.buildHeartRateControlPacketLefun(start)
                 val pktPadded = DigmaProtocolCodec.padToLength(pkt1, 20)
@@ -1103,6 +1166,34 @@ class BleManager(private val context: Context) {
             }
         }
         return true
+    }
+
+    private fun startHeartRateFallbackSequence(gen: Long) {
+        hrFallbackJob = scope.launch {
+            val probes = listOf(
+                Triple(1_800L, "0x14 (ref=1, mode=1)") {
+                    SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 1L, mode = 1)
+                },
+                Triple(1_800L, "0x14 (ref=0, mode=1)") {
+                    SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 0L, mode = 1)
+                },
+                Triple(1_800L, "PPG 0x23 (mode=1)") {
+                    SxrKeepFitCodec.buildCombinedMeasurementStartPacket(mode = 1)
+                },
+                Triple(2_200L, "PPG 0x23 (mode=2)") {
+                    SxrKeepFitCodec.buildCombinedMeasurementStartPacket(mode = 2)
+                }
+            )
+            for ((waitMs, label, builder) in probes) {
+                delay(waitMs)
+                if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
+                if (!_healthMetrics.value.isMeasuringHeartRate || receivedHrSampleInCurrentSession) return@launch
+                logDiagnostic("SXR HR: нет ответа, пробуем $label...")
+                enqueueCommand(gen) {
+                    sendPacketsSuspend(listOf(builder()), delayBetweenMs = 0L)
+                }
+            }
+        }
     }
 
     fun sendNotification(type: DigmaProtocolCodec.NotificationType, title: String, text: String): Boolean {
@@ -1143,5 +1234,15 @@ class BleManager(private val context: Context) {
     fun testFindWatchPadded(): Boolean {
         logDiagnostic("ТЕСТ: Find Watch (20-байт фрейм с нулями)")
         return sendPacket(DigmaProtocolCodec.padToLength(DigmaProtocolCodec.buildFindWatchPacket(), 20))
+    }
+
+    fun testHeartRateSxrMode(): Boolean {
+        logDiagnostic("ТЕСТ: HR 0x14 (ref=1, mode=1)")
+        return sendPacket(SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 1L, mode = 1))
+    }
+
+    fun testCombinedPpgSxr(mode: Int = 2): Boolean {
+        logDiagnostic("ТЕСТ: PPG 0x23 (mode=$mode)")
+        return sendPacket(SxrKeepFitCodec.buildCombinedMeasurementStartPacket(mode = mode))
     }
 }

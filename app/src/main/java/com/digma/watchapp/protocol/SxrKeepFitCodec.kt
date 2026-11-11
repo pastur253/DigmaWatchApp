@@ -139,10 +139,7 @@ object SxrKeepFitCodec {
     ): ByteArray = frame(CMD_TIME_SYNC) { packet ->
         val offsetSeconds = timeZone.getOffset(epochSeconds * 1000L) / 1000L
         val localEpoch = (epochSeconds + offsetSeconds).coerceAtLeast(0L)
-        packet[1] = (localEpoch and 0xFFL).toByte()
-        packet[2] = ((localEpoch ushr 8) and 0xFFL).toByte()
-        packet[3] = ((localEpoch ushr 16) and 0xFFL).toByte()
-        packet[4] = ((localEpoch ushr 24) and 0xFFL).toByte()
+        writeU32Le(packet, 1, localEpoch)
         packet[5] = ((offsetSeconds / 3600L) and 0xFFL).toByte()
     }
 
@@ -172,16 +169,34 @@ object SxrKeepFitCodec {
     }
 
     fun buildHeartRateStartPacket(): ByteArray = frame(CMD_HEART_RATE_START) { packet ->
+        // bytes[1..4]=reference_u32le (0xB4 = 180s), byte[5]=mode_code (1 = active)
         packet[1] = 0xB4.toByte()
+        packet[5] = 0x01
     }
 
-    fun buildHeartRateStopPacket(): ByteArray = frame(CMD_HEART_RATE_STOP)
-
-    fun buildSpO2StartPacket(): ByteArray = frame(CMD_SENSOR_MODE) { packet ->
-        packet[1] = 0x02
+    /** Builds a `0x14` setHeartRateMode request with explicit reference value and mode byte. */
+    fun buildHeartRateModePacket(
+        referenceValue: Long = 0L,
+        mode: Int = 1
+    ): ByteArray = frame(CMD_HEART_RATE_START) { packet ->
+        writeU32Le(packet, 1, referenceValue)
+        packet[5] = (mode and 0xFF).toByte()
     }
 
-    fun buildSpO2StopPacket(): ByteArray = frame(CMD_SENSOR_MODE)
+    fun buildHeartRateStopPacket(mode: Int = 1): ByteArray = frame(CMD_HEART_RATE_STOP) { packet ->
+        packet[5] = (mode and 0xFF).toByte()
+    }
+
+    /** Builds a `0x23` combined-sensor request (mode 1 = BP+HR, mode 2 = SpO2+HR+BP). */
+    fun buildCombinedMeasurementStartPacket(mode: Int = 2): ByteArray = frame(CMD_SENSOR_MODE) { packet ->
+        packet[1] = (mode and 0xFF).toByte()
+    }
+
+    fun buildCombinedMeasurementStopPacket(): ByteArray = frame(CMD_SENSOR_MODE)
+
+    fun buildSpO2StartPacket(): ByteArray = buildCombinedMeasurementStartPacket(mode = 2)
+
+    fun buildSpO2StopPacket(): ByteArray = buildCombinedMeasurementStopPacket()
 
     fun buildKeepalivePacket(): ByteArray = frame(CMD_KEEPALIVE)
 
@@ -239,7 +254,10 @@ object SxrKeepFitCodec {
             CMD_TIME_SYNC -> SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.TimeSyncAck)
             CMD_USER_INFO,
             CMD_AUTO_HEART,
+            CMD_HEART_RATE_STOP,
             CMD_GOAL,
+            CMD_SENSOR_MODE,
+            0x25,
             CMD_HR_COMPLETE,
             CMD_SPO2_COMPLETE,
             CMD_KEEPALIVE -> SxrEvent.CommandAck(opcode)
@@ -259,16 +277,32 @@ object SxrKeepFitCodec {
             CMD_BIND_INFO -> parseBindNotify(data)
             CMD_STEP_COUNTER -> parseStepCounter(data)
             CMD_FIRMWARE_VERSION -> parseFirmwareVersion(data)
-            0x81, 0x82, 0x83, 0x84, 0x8B, 0x8C, 0x92, 0x94 -> SxrEvent.CommandError(opcode)
+            0x81, 0x82, 0x83, 0x84, 0x8B, 0x8C, 0x92, 0x94, 0x95, 0xA0, 0xA3, 0xA5 -> SxrEvent.CommandError(opcode)
             else -> SxrEvent.Unknown(opcode, data)
         }
     }
 
+    /** Parses standard Bluetooth SIG Heart Rate Measurement characteristic (`0x2A37`) frames. */
+    fun parseStandardBleHeartRate(data: ByteArray): DigmaProtocolCodec.IncomingPacket.HeartRate? {
+        if (data.size < 2) return null
+        val flags = data[0].toInt() and 0xFF
+        val isUint16 = (flags and 0x01) != 0
+        val bpm = if (isUint16) {
+            if (data.size < 3) return null
+            u16le(data, 1)
+        } else {
+            data[1].toInt() and 0xFF
+        }
+        if (bpm <= 0) return null
+        return DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0)
+    }
+
     private fun parseCurrentSport(data: ByteArray): SxrEvent {
-        if (data.size < 17) return SxrEvent.Unknown(CMD_CURRENT_SPORT, data)
-        val steps = u32le(data, 5).toInt()
-        val distanceMeters = u32le(data, 9).toInt()
-        val calories = u32le(data, 13).toInt()
+        if (data.size < 14) return SxrEvent.Unknown(CMD_CURRENT_SPORT, data)
+        val useThreeByteFields = isThreeByteCurrentSport(data)
+        val steps = if (useThreeByteFields) u24le(data, 5) else u32le(data, 5).toInt()
+        val distanceMeters = if (useThreeByteFields) u24le(data, 8) else u32le(data, 9).toInt()
+        val calories = if (useThreeByteFields) u24le(data, 11) else u32le(data, 13).toInt()
         return SxrEvent.Standard(
             DigmaProtocolCodec.IncomingPacket.Activity(
                 steps = steps,
@@ -276,6 +310,16 @@ object SxrKeepFitCodec {
                 distanceMeters = distanceMeters
             )
         )
+    }
+
+    private fun isThreeByteCurrentSport(data: ByteArray): Boolean {
+        if (data.size < 17) return true
+        // Smartwatches (e.g. Digma D3L) pack steps/distance/calories as 3-byte u24le at offsets 5, 8, 11,
+        // whereas 4-byte ring frames place u32le at 5, 9, 13 (leaving bytes[8], [12] zero for normal counts).
+        if (data[8].toInt() != 0 || data[12].toInt() != 0) return true
+        if (data[11].toInt() != 0 && u32le(data, 13) == 0L) return true
+        if (u32le(data, 9) >= 65_536L && u32le(data, 13) == 0L) return true
+        return false
     }
 
     private fun parseStepCounter(data: ByteArray): SxrEvent {
@@ -316,11 +360,26 @@ object SxrKeepFitCodec {
     }
 
     private fun parseLiveHeartRate(data: ByteArray): SxrEvent {
-        if (data.size < 6) return SxrEvent.Unknown(CMD_HEART_RATE_START, data)
+        if (data.size < 2) return SxrEvent.Unknown(CMD_HEART_RATE_START, data)
+        if (data.size < 6) {
+            val compactBpm = data[1].toInt() and 0xFF
+            return when {
+                compactBpm in 25..250 -> SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(compactBpm, 0))
+                compactBpm == 0 -> SxrEvent.CommandError(CMD_HEART_RATE_START)
+                else -> SxrEvent.Unknown(CMD_HEART_RATE_START, data)
+            }
+        }
         val ts = u32le(data, 1)
-        if (ts == 0L) return SxrEvent.CommandError(CMD_HEART_RATE_START)
         val bpm = data[5].toInt() and 0xFF
-        return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0))
+        if (bpm > 0) {
+            return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0))
+        }
+        if (ts == 0L) return SxrEvent.CommandError(CMD_HEART_RATE_START)
+        val compactBpm = data[2].toInt() and 0xFF
+        if (ts in 1L..3L && compactBpm in 25..250) {
+            return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(compactBpm, 0))
+        }
+        return SxrEvent.CommandAck(CMD_HEART_RATE_START)
     }
 
     private fun parseCombinedSensor(data: ByteArray): SxrEvent {
@@ -378,9 +437,23 @@ object SxrKeepFitCodec {
         return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.WatchEvent(action))
     }
 
+    private fun writeU32Le(target: ByteArray, offset: Int, value: Long) {
+        val v = value and 0xFFFFFFFFL
+        target[offset] = (v and 0xFFL).toByte()
+        target[offset + 1] = ((v ushr 8) and 0xFFL).toByte()
+        target[offset + 2] = ((v ushr 16) and 0xFFL).toByte()
+        target[offset + 3] = ((v ushr 24) and 0xFFL).toByte()
+    }
+
     private fun u16le(data: ByteArray, offset: Int): Int {
         return (data[offset].toInt() and 0xFF) or
             ((data[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun u24le(data: ByteArray, offset: Int): Int {
+        return (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8) or
+            ((data[offset + 2].toInt() and 0xFF) shl 16)
     }
 
     private fun u32le(data: ByteArray, offset: Int): Long {

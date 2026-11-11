@@ -503,6 +503,40 @@ fun DiagnosticSection(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
+                // Command buttons row 3: Targeted Heart Rate / PPG probes
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.testHeartRateSxrMode() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("HR 0x14", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
+                    Button(
+                        onClick = { viewModel.testCombinedPpgSxr(2) },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("PPG 0x23", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
+                    OutlinedButton(
+                        onClick = { viewModel.stopHeartRate() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
+                    ) {
+                        Text("HR Стоп", fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
                 // Switch between live TX/RX log and pinned GATT service map
                 Row(
                     modifier = Modifier.fillMaxWidth(),

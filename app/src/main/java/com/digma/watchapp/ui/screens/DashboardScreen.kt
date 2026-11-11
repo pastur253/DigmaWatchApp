@@ -241,7 +241,15 @@ fun DashboardScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         val distanceKm = String.format(Locale.US, "%.2f", metrics.distanceMeters / 1000.0)
                         Text(text = "$distanceKm км", fontWeight = FontWeight.Bold)
-                        Text(text = "Дистанция", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = if (metrics.distanceMeters in 1..999) {
+                                "Дистанция (${metrics.distanceMeters} м)"
+                            } else {
+                                "Дистанция"
+                            },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

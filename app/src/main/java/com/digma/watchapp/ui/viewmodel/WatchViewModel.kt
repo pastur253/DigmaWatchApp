@@ -63,6 +63,18 @@ class WatchViewModel : ViewModel() {
         return bleManager.testFindWatchPadded()
     }
 
+    fun testHeartRateSxrMode(): Boolean {
+        return bleManager.testHeartRateSxrMode()
+    }
+
+    fun testCombinedPpgSxr(mode: Int = 2): Boolean {
+        return bleManager.testCombinedPpgSxr(mode)
+    }
+
+    fun stopHeartRate(): Boolean {
+        return bleManager.toggleHeartRateMeasurement(false)
+    }
+
     fun clearDiagnosticLogs() {
         bleManager.clearDiagnosticLogs()
     }

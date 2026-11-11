@@ -80,9 +80,16 @@ class SxrKeepFitCodecTest {
         val hrStart = SxrKeepFitCodec.buildHeartRateStartPacket()
         assertEquals(0x14.toByte(), hrStart[0])
         assertEquals(0xB4.toByte(), hrStart[1])
+        assertEquals(0x01.toByte(), hrStart[5])
+
+        val hrMode = SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 1L, mode = 1)
+        assertEquals(0x14.toByte(), hrMode[0])
+        assertEquals(0x01.toByte(), hrMode[1])
+        assertEquals(0x01.toByte(), hrMode[5])
 
         val hrStop = SxrKeepFitCodec.buildHeartRateStopPacket()
         assertEquals(0x15.toByte(), hrStop[0])
+        assertEquals(0x01.toByte(), hrStop[5])
 
         val spo2Start = SxrKeepFitCodec.buildSpO2StartPacket()
         assertEquals(0x23.toByte(), spo2Start[0])
@@ -317,6 +324,100 @@ class SxrKeepFitCodecTest {
         }
         val parsed = SxrKeepFitCodec.parseIncomingPacket(cap) as SxrKeepFitCodec.SxrEvent.BandCapabilities
         assertArrayEquals(cap.copyOfRange(1, 20), parsed.bitmask)
+    }
+
+    @Test
+    fun `parseCurrentSport decodes 3-byte u24le watch fields from Digma D3L regression vector`() {
+        // Exact wire layout reconstructed from v0.0.6 report (352321569=0x15000021, 131072=0x00020000, 0)
+        // Watch values: 33 steps (0x21), 21 meters (0x15), 2 kcal (0x02)
+        val d3lPacket = byteArrayOf(
+            0x03,
+            0x10, 0x20, 0x30, 0x67,
+            0x21, 0x00, 0x00,
+            0x15, 0x00, 0x00,
+            0x02, 0x00, 0x00,
+            0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(33, 2, 21)),
+            SxrKeepFitCodec.parseIncomingPacket(d3lPacket)
+        )
+
+        // 3-byte packet where distance is exact multiple of 256 (0x0100 = 256m) and calories=10
+        val alignedWatchPacket = byteArrayOf(
+            0x03,
+            0x00, 0x00, 0x00, 0x00,
+            0xC0.toByte(), 0x01, 0x00, // 448 steps
+            0x00, 0x01, 0x00,          // 256m
+            0x0A, 0x00, 0x00,          // 10 kcal
+            0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(448, 10, 256)),
+            SxrKeepFitCodec.parseIncomingPacket(alignedWatchPacket)
+        )
+
+        // Compact 14-byte 3-byte frame
+        val compactPacket = byteArrayOf(
+            0x03,
+            0x00, 0x00, 0x00, 0x00,
+            0x05, 0x00, 0x00,
+            0x03, 0x00, 0x00,
+            0x01, 0x00, 0x00
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.Activity(5, 1, 3)),
+            SxrKeepFitCodec.parseIncomingPacket(compactPacket)
+        )
+    }
+
+    @Test
+    fun `parseLiveHeartRate and parseStandardBleHeartRate handle zero-ts and SIG 0x2A37 frames`() {
+        // 0x14 live HR with ts==0 but valid BPM at byte[5]
+        val zeroTsHr = ByteArray(20).apply {
+            this[0] = 0x14
+            this[5] = 72
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(72, 0)),
+            SxrKeepFitCodec.parseIncomingPacket(zeroTsHr)
+        )
+
+        // 0x14 echo with ts!=0 and bpm==0 should be CommandAck, not zero BPM sample
+        val warmupEcho = ByteArray(20).apply {
+            this[0] = 0x14
+            this[1] = 0xB4.toByte()
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.CommandAck(0x14),
+            SxrKeepFitCodec.parseIncomingPacket(warmupEcho)
+        )
+
+        // 0x15 HR stop ACK and 0x23 PPG ACK
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.CommandAck(0x15),
+            SxrKeepFitCodec.parseIncomingPacket(ByteArray(20).apply { this[0] = 0x15 })
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.CommandAck(0x23),
+            SxrKeepFitCodec.parseIncomingPacket(ByteArray(20).apply { this[0] = 0x23 })
+        )
+
+        // Standard BLE 0x2A37 uint8 and uint16 formats
+        assertEquals(
+            DigmaProtocolCodec.IncomingPacket.HeartRate(68, 0),
+            SxrKeepFitCodec.parseStandardBleHeartRate(byteArrayOf(0x00, 68))
+        )
+        assertEquals(
+            DigmaProtocolCodec.IncomingPacket.HeartRate(112, 0),
+            SxrKeepFitCodec.parseStandardBleHeartRate(byteArrayOf(0x01, 0x70, 0x00))
+        )
+        assertEquals(
+            null,
+            SxrKeepFitCodec.parseStandardBleHeartRate(byteArrayOf(0x00, 0x00))
+        )
     }
 
     private fun decodeNullTerminatedUtf8(frame: ByteArray, offset: Int): String {
