@@ -3,6 +3,7 @@ package com.digma.watchapp.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import com.digma.watchapp.DigmaApp
 import com.digma.watchapp.ble.BleConnectionState
+import com.digma.watchapp.ble.WatchProtocolMode
 import com.digma.watchapp.model.HealthMetrics
 import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.model.WatchSettings
@@ -28,14 +29,26 @@ class WatchViewModel : ViewModel() {
     val discoveredDevices: StateFlow<List<WatchDevice>> = bleScanner.discoveredDevices
     val settings: StateFlow<WatchSettings> = app.settings
     val diagnosticLogs: StateFlow<List<String>> = bleManager.diagnosticLogs
-    val activeWriteUuid: String? get() = bleManager.writeCharacteristic?.uuid?.toString()
-    val activeNotifyUuid: String? get() = bleManager.notifyCharacteristic?.uuid?.toString()
+    val gattSummary: StateFlow<List<String>> = bleManager.gattSummary
+    val activeWriteUuid: StateFlow<String?> = bleManager.activeWriteUuid
+    val activeNotifyUuid: StateFlow<String?> = bleManager.activeNotifyUuid
+    val protocolMode: StateFlow<WatchProtocolMode> = bleManager.protocolMode
+    val detectedProtocol: StateFlow<WatchProtocolMode> = bleManager.detectedProtocol
+    val deviceFirmware: StateFlow<String?> = bleManager.deviceFirmware
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
 
+    fun setProtocolMode(mode: WatchProtocolMode) {
+        bleManager.setProtocolMode(mode)
+    }
+
     fun swapCharacteristics(): Boolean {
         return bleManager.swapCharacteristics()
+    }
+
+    fun testFindWatchSxr(): Boolean {
+        return bleManager.testFindWatchSxr()
     }
 
     fun testFindWatchAdor(): Boolean {

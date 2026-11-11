@@ -53,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.digma.watchapp.ble.BleConnectionState
+import com.digma.watchapp.ble.WatchProtocolMode
 import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.ui.theme.PrimaryCyan
 import com.digma.watchapp.ui.theme.StatusConnected
@@ -230,10 +231,17 @@ fun DiagnosticSection(
     modifier: Modifier = Modifier
 ) {
     val logs by viewModel.diagnosticLogs.collectAsState()
-    val writeUuid = viewModel.activeWriteUuid
-    val notifyUuid = viewModel.activeNotifyUuid
+    val gattSummary by viewModel.gattSummary.collectAsState()
+    val writeUuid by viewModel.activeWriteUuid.collectAsState()
+    val notifyUuid by viewModel.activeNotifyUuid.collectAsState()
+    val protocolMode by viewModel.protocolMode.collectAsState()
+    val detectedProtocol by viewModel.detectedProtocol.collectAsState()
+    val deviceFirmware by viewModel.deviceFirmware.collectAsState()
     val clipboardManager = LocalClipboardManager.current
     var isExpanded by remember { mutableStateOf(false) }
+    var showGattTab by remember { mutableStateOf(false) }
+
+    val activeProtocol = if (protocolMode == WatchProtocolMode.AUTO) detectedProtocol else protocolMode
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -268,7 +276,7 @@ fun DiagnosticSection(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (writeUuid != null) {
                         Text(
-                            text = "GATT готов",
+                            text = "${activeProtocol.label}",
                             fontSize = 11.sp,
                             color = StatusConnected,
                             fontWeight = FontWeight.Medium
@@ -286,8 +294,8 @@ fun DiagnosticSection(
             if (isExpanded) {
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Active UUIDs badge & SWAP button
-                if (writeUuid != null || notifyUuid != null) {
+                // Active UUIDs, firmware & SWAP button
+                if (writeUuid != null || notifyUuid != null || !deviceFirmware.isNullOrBlank()) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -313,17 +321,71 @@ fun DiagnosticSection(
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                if (!deviceFirmware.isNullOrBlank()) {
+                                    Text(
+                                        text = "FW/MAC:      $deviceFirmware",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = StatusConnected
+                                    )
+                                }
                             }
                             OutlinedButton(
                                 onClick = { viewModel.swapCharacteristics() },
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Text("Поменять TX ⇄ RX", fontSize = 10.sp, color = PrimaryCyan)
+                                Text("TX ⇄ RX", fontSize = 10.sp, color = PrimaryCyan)
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
+
+                // Protocol mode selector (Авто / SXR 56ff / 0xAB)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Протокол:",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    WatchProtocolMode.entries.forEach { mode ->
+                        val isSelected = protocolMode == mode
+                        if (isSelected) {
+                            Button(
+                                onClick = { viewModel.setProtocolMode(mode) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                            ) {
+                                val caption = if (mode == WatchProtocolMode.AUTO && writeUuid != null) {
+                                    "Авто (${detectedProtocol.label})"
+                                } else {
+                                    mode.label
+                                }
+                                Text(caption, fontSize = 10.sp, color = Color.Black, maxLines = 1)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { viewModel.setProtocolMode(mode) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    mode.label,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Command buttons row 1: Primary actions
                 Row(
@@ -359,7 +421,18 @@ fun DiagnosticSection(
 
                     OutlinedButton(
                         onClick = {
-                            clipboardManager.setText(AnnotatedString(logs.joinToString("\n")))
+                            val header = buildList {
+                                add("=== DIGMA BLE DIAGNOSTICS ===")
+                                add("Protocol: mode=${protocolMode.label}, detected=${detectedProtocol.label}, active=${activeProtocol.label}")
+                                add("TX=${writeUuid ?: "none"} | RX=${notifyUuid ?: "none"}")
+                                if (!deviceFirmware.isNullOrBlank()) add("Firmware/MAC: $deviceFirmware")
+                                if (gattSummary.isNotEmpty()) {
+                                    add("--- GATT SUMMARY ---")
+                                    addAll(gattSummary)
+                                }
+                                add("--- LOGS (${logs.size}) ---")
+                            }
+                            clipboardManager.setText(AnnotatedString((header + logs).joinToString("\n")))
                         },
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                     ) {
@@ -389,57 +462,102 @@ fun DiagnosticSection(
                 // Command buttons row 2: Targeted vibration protocol tests
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    Button(
+                        onClick = { viewModel.testFindWatchSxr() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("SXR 0x04", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
                     Button(
                         onClick = { viewModel.testFindWatchAdor() },
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
-                        Text("Вибро Ador", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                        Text("Ador", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
                     }
 
                     Button(
                         onClick = { viewModel.testFindWatchLefun() },
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
-                        Text("Вибро Lefun", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                        Text("Lefun", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
                     }
 
                     Button(
                         onClick = { viewModel.testFindWatchPadded() },
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
-                        Text("Вибро 20B", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                        Text("20B AB", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                // Scrollable log console
+                // Switch between live TX/RX log and pinned GATT service map
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { showGattTab = false },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            "Логи (${logs.size})",
+                            fontSize = 10.sp,
+                            color = if (!showGattTab) PrimaryCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { showGattTab = true },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            "GATT карта (${gattSummary.size})",
+                            fontSize = 10.sp,
+                            color = if (showGattTab) PrimaryCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Scrollable log / GATT console
+                val visibleLines = if (showGattTab) gattSummary else logs
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp)
+                        .height(190.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFF0F141C))
                         .padding(8.dp)
                 ) {
-                    if (logs.isEmpty()) {
+                    if (visibleLines.isEmpty()) {
                         Text(
-                            text = "Логи пока пусты. Подключитесь к часам.",
+                            text = if (showGattTab) {
+                                "GATT-карта появится после подключения к часам."
+                            } else {
+                                "Логи пока пусты. Подключитесь к часам."
+                            },
                             fontSize = 11.sp,
                             color = Color.Gray,
                             fontFamily = FontFamily.Monospace
                         )
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(logs) { entry ->
+                            items(visibleLines) { entry ->
                                 val textColor = when {
                                     entry.contains("TX") -> Color(0xFF80DEEA)
                                     entry.contains("RX") -> Color(0xFFA5D6A7)
