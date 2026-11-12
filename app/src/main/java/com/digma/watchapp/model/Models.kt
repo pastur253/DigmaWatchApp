@@ -51,3 +51,21 @@ data class ActivityHistoryItem(
     val heartRate: Int,
     val calories: Int
 )
+
+data class HeartRateSample(
+    val timestampMs: Long,
+    val bpm: Int
+)
+
+data class HourlyActivityPoint(
+    val hour: Int, // 0..23
+    val steps: Int
+)
+
+data class DailyActivityPoint(
+    val dateKey: String, // yyyy-MM-dd
+    val label: String,   // dd.MM
+    val steps: Int,
+    val caloriesKcal: Int,
+    val distanceMeters: Int
+)

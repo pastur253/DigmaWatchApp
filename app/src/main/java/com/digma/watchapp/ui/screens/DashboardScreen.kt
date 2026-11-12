@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.digma.watchapp.ble.BleConnectionState
+import com.digma.watchapp.ui.components.HeartRateSparkline
 import com.digma.watchapp.ui.theme.HeartRateRed
 import com.digma.watchapp.ui.theme.PrimaryCyan
 import com.digma.watchapp.ui.theme.StatusConnected
@@ -70,6 +71,7 @@ fun DashboardScreen(
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
     val metrics by viewModel.healthMetrics.collectAsState()
+    val heartRateHistory by viewModel.heartRateHistory.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
 
     val isConnected = connectionState is BleConnectionState.Connected
@@ -318,6 +320,11 @@ fun DashboardScreen(
                         )
                         Text(text = "Кислород SpO2", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+
+                if (heartRateHistory.size >= 2) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HeartRateSparkline(samples = heartRateHistory)
                 }
             }
         }

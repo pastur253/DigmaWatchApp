@@ -13,7 +13,11 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.digma.watchapp.data.HealthHistoryStore
+import com.digma.watchapp.model.DailyActivityPoint
 import com.digma.watchapp.model.HealthMetrics
+import com.digma.watchapp.model.HeartRateSample
+import com.digma.watchapp.model.HourlyActivityPoint
 import com.digma.watchapp.protocol.DigmaProtocolCodec
 import com.digma.watchapp.protocol.SxrKeepFitCodec
 import kotlinx.coroutines.CompletableDeferred
@@ -155,6 +159,15 @@ class BleManager(private val context: Context) {
 
     private val _deviceFirmware = MutableStateFlow<String?>(null)
     val deviceFirmware: StateFlow<String?> = _deviceFirmware.asStateFlow()
+
+    private val historyStore = HealthHistoryStore(context)
+    val heartRateHistory: StateFlow<List<HeartRateSample>> = historyStore.heartRateHistory
+    val hourlyActivity: StateFlow<List<HourlyActivityPoint>> = historyStore.hourlyActivity
+    val dailyActivity: StateFlow<List<DailyActivityPoint>> = historyStore.dailyActivity
+
+    fun clearHealthHistory() {
+        historyStore.clearAll()
+    }
 
     private var notificationUidCounter = 1
 
@@ -391,7 +404,7 @@ class BleManager(private val context: Context) {
             activeGatt?.let { readStandardBatteryIfAvailable(it) }
             if (gen != connectionGeneration) return
             if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
-                logDiagnostic("SXR: Инициализация канала (AppId, DeviceInfo, Время, Профиль, АКБ, Активность)...")
+                logDiagnostic("SXR: Инициализация канала (AppId, DeviceInfo, Время, Профиль, АКБ, Активность, Пульс)...")
                 sendPacketsSuspend(
                     listOf(
                         SxrKeepFitCodec.buildAppIdPacket(),
@@ -400,7 +413,9 @@ class BleManager(private val context: Context) {
                         SxrKeepFitCodec.buildUserInfoPacket(),
                         SxrKeepFitCodec.buildBatteryQueryPacket(),
                         SxrKeepFitCodec.buildActivityQueryPacket(),
-                        SxrKeepFitCodec.buildBandFunctionQueryPacket()
+                        SxrKeepFitCodec.buildActivityHistoryQueryPacket(0L),
+                        SxrKeepFitCodec.buildBandFunctionQueryPacket(),
+                        SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)
                     ),
                     delayBetweenMs = 80L
                 )
@@ -885,12 +900,49 @@ class BleManager(private val context: Context) {
                 is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> {
                     val sumSteps = sxr.stepSamples.sum()
                     logDiagnostic("RX SXR Бакеты активности (0x10): +$sumSteps шагов (${sxr.stepSamples.size} мин)")
+                    historyStore.recordActivityBuckets(sxr.baseEpochSeconds, sxr.stepSamples)
                     _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
+                    return
+                }
+                is SxrKeepFitCodec.SxrEvent.HeartRateHistory -> {
+                    val lastBpm = sxr.bpmSamples.lastOrNull()
+                    logDiagnostic(
+                        "RX SXR История пульса (0x16): замеров=${sxr.bpmSamples.size}, посл=${lastBpm ?: 0} уд/мин"
+                    )
+                    historyStore.recordHeartRateBatch(sxr.baseEpochSeconds, sxr.bpmSamples)
+                    if (lastBpm != null) {
+                        updateFromStandardPacket(
+                            DigmaProtocolCodec.IncomingPacket.HeartRate(lastBpm, 0),
+                            recordToHistory = false
+                        )
+                    } else {
+                        _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
+                    }
+                    return
+                }
+                is SxrKeepFitCodec.SxrEvent.HeartRateComplete -> {
+                    logDiagnostic("RX SXR Замер пульса завершён (0x27): HR=${sxr.heartRateBpm}")
+                    _healthMetrics.update {
+                        it.copy(
+                            isMeasuringHeartRate = false,
+                            lastSyncTimestamp = System.currentTimeMillis()
+                        )
+                    }
+                    if (sxr.heartRateBpm > 0) {
+                        updateFromStandardPacket(DigmaProtocolCodec.IncomingPacket.HeartRate(sxr.heartRateBpm, 0))
+                    }
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.CommandAck -> {
                     logDiagnostic(String.format(Locale.US, "RX SXR ACK: 0x%02X", sxr.opcode))
-                    _healthMetrics.update { it.copy(lastSyncTimestamp = System.currentTimeMillis()) }
+                    _healthMetrics.update { current ->
+                        val stopMeasuring = sxr.opcode == SxrKeepFitCodec.CMD_SPO2_COMPLETE ||
+                            sxr.opcode == SxrKeepFitCodec.CMD_HEART_RATE_STOP
+                        current.copy(
+                            isMeasuringHeartRate = if (stopMeasuring) false else current.isMeasuringHeartRate,
+                            lastSyncTimestamp = System.currentTimeMillis()
+                        )
+                    }
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.CommandError -> {
@@ -926,9 +978,25 @@ class BleManager(private val context: Context) {
                 DigmaProtocolCodec.IncomingPacket.HeartRate(sxrFallback.heartRateBpm, sxrFallback.spO2Percent)
             )
             is SxrKeepFitCodec.SxrEvent.StepCounter -> handleSxrStepCounter(sxrFallback.cumulativeSteps)
-            is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> logDiagnostic(
-                "RX SXR Бакеты активности (0x10): +${sxrFallback.stepSamples.sum()} шагов"
-            )
+            is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> {
+                logDiagnostic("RX SXR Бакеты активности (0x10): +${sxrFallback.stepSamples.sum()} шагов")
+                historyStore.recordActivityBuckets(sxrFallback.baseEpochSeconds, sxrFallback.stepSamples)
+            }
+            is SxrKeepFitCodec.SxrEvent.HeartRateHistory -> {
+                historyStore.recordHeartRateBatch(sxrFallback.baseEpochSeconds, sxrFallback.bpmSamples)
+                sxrFallback.bpmSamples.lastOrNull()?.let { lastBpm ->
+                    updateFromStandardPacket(
+                        DigmaProtocolCodec.IncomingPacket.HeartRate(lastBpm, 0),
+                        recordToHistory = false
+                    )
+                }
+            }
+            is SxrKeepFitCodec.SxrEvent.HeartRateComplete -> {
+                _healthMetrics.update { it.copy(isMeasuringHeartRate = false) }
+                if (sxrFallback.heartRateBpm > 0) {
+                    updateFromStandardPacket(DigmaProtocolCodec.IncomingPacket.HeartRate(sxrFallback.heartRateBpm, 0))
+                }
+            }
             else -> logDiagnostic("RX: Пакет не распознан протоколом (len=${data.size})")
         }
     }
@@ -943,12 +1011,26 @@ class BleManager(private val context: Context) {
         }
     }
 
-    private fun updateFromStandardPacket(event: DigmaProtocolCodec.IncomingPacket) {
-        if (event is DigmaProtocolCodec.IncomingPacket.HeartRate && event.heartRateBpm > 0) {
+    private fun updateFromStandardPacket(
+        event: DigmaProtocolCodec.IncomingPacket,
+        recordToHistory: Boolean = true
+    ) {
+        if (event is DigmaProtocolCodec.IncomingPacket.HeartRate && event.heartRateBpm in 25..250) {
             receivedHrSampleInCurrentSession = true
             hrFallbackJob?.cancel()
         }
         val now = System.currentTimeMillis()
+        if (recordToHistory) {
+            when (event) {
+                is DigmaProtocolCodec.IncomingPacket.Activity ->
+                    historyStore.recordCurrentActivity(event.steps, event.calories, event.distanceMeters, now)
+                is DigmaProtocolCodec.IncomingPacket.HeartRate ->
+                    if (event.heartRateBpm in 25..250) {
+                        historyStore.recordHeartRate(event.heartRateBpm, now)
+                    }
+                else -> Unit
+            }
+        }
         _healthMetrics.update { current ->
             when (event) {
                 is DigmaProtocolCodec.IncomingPacket.Battery -> current.copy(
@@ -1230,7 +1312,41 @@ class BleManager(private val context: Context) {
                     sendPacketsSuspend(listOf(builder()), delayBetweenMs = 0L)
                 }
             }
+            delay(4_500L)
+            if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
+            if (!_healthMetrics.value.isMeasuringHeartRate || receivedHrSampleInCurrentSession) return@launch
+            logDiagnostic("SXR HR: опрашиваем историю пульса (0x16)...")
+            enqueueCommand(gen) {
+                sendPacketsSuspend(listOf(SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)), delayBetweenMs = 0L)
+            }
+            delay(4_000L)
+            if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
+            if (_healthMetrics.value.isMeasuringHeartRate && !receivedHrSampleInCurrentSession) {
+                logDiagnostic("SXR HR: таймаут ожидания замера пульса")
+                _healthMetrics.update { it.copy(isMeasuringHeartRate = false) }
+                enqueueCommand(gen) {
+                    sendPacketsSuspend(
+                        listOf(
+                            SxrKeepFitCodec.buildHeartRateStopPacket(),
+                            SxrKeepFitCodec.buildCombinedMeasurementStopPacket()
+                        ),
+                        delayBetweenMs = 80L
+                    )
+                }
+            }
         }
+    }
+
+    fun queryHeartRateHistory(): Boolean {
+        if (!canTransmit()) return false
+        logDiagnostic("Команда: Запрос истории пульса...")
+        val gen = connectionGeneration
+        enqueueCommand(gen) {
+            if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
+                sendPacketsSuspend(listOf(SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)), delayBetweenMs = 0L)
+            }
+        }
+        return true
     }
 
     fun sendNotification(type: DigmaProtocolCodec.NotificationType, title: String, text: String): Boolean {

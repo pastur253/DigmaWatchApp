@@ -16,12 +16,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,6 +35,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.digma.watchapp.ble.BleConnectionState
+import com.digma.watchapp.ui.components.ActivityChartCard
+import com.digma.watchapp.ui.components.HeartRateChartCard
 import com.digma.watchapp.ui.theme.HeartRateRed
 import com.digma.watchapp.ui.theme.PrimaryCyan
 import com.digma.watchapp.ui.theme.StepsOrange
@@ -40,7 +46,12 @@ import com.digma.watchapp.ui.viewmodel.WatchViewModel
 @Composable
 fun HistoryScreen(viewModel: WatchViewModel) {
     val metrics by viewModel.healthMetrics.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val heartRateHistory by viewModel.heartRateHistory.collectAsState()
+    val hourlyActivity by viewModel.hourlyActivity.collectAsState()
+    val dailyActivity by viewModel.dailyActivity.collectAsState()
     val scrollState = rememberScrollState()
+    val isConnected = connectionState is BleConnectionState.Connected
 
     Column(
         modifier = Modifier
@@ -50,11 +61,47 @@ fun HistoryScreen(viewModel: WatchViewModel) {
             .verticalScroll(scrollState),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(
-            text = "История и статистика",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "История и графики",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isConnected) {
+                    IconButton(onClick = { viewModel.syncAll() }) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Обновить данные",
+                            tint = PrimaryCyan
+                        )
+                    }
+                }
+                if (heartRateHistory.isNotEmpty() || dailyActivity.isNotEmpty()) {
+                    IconButton(onClick = { viewModel.clearHealthHistory() }) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Очистить историю",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        ActivityChartCard(
+            hourlyPoints = hourlyActivity,
+            dailyPoints = dailyActivity,
+            stepGoal = metrics.stepGoal
+        )
+
+        HeartRateChartCard(
+            samples = heartRateHistory
         )
 
         // Summary Card

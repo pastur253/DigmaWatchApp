@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModel
 import com.digma.watchapp.DigmaApp
 import com.digma.watchapp.ble.BleConnectionState
 import com.digma.watchapp.ble.WatchProtocolMode
+import com.digma.watchapp.model.DailyActivityPoint
 import com.digma.watchapp.model.HealthMetrics
+import com.digma.watchapp.model.HeartRateSample
+import com.digma.watchapp.model.HourlyActivityPoint
 import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.model.WatchSettings
 import com.digma.watchapp.protocol.DigmaProtocolCodec
@@ -36,6 +39,9 @@ class WatchViewModel : ViewModel() {
     val protocolMode: StateFlow<WatchProtocolMode> = bleManager.protocolMode
     val detectedProtocol: StateFlow<WatchProtocolMode> = bleManager.detectedProtocol
     val deviceFirmware: StateFlow<String?> = bleManager.deviceFirmware
+    val heartRateHistory: StateFlow<List<HeartRateSample>> = bleManager.heartRateHistory
+    val hourlyActivity: StateFlow<List<HourlyActivityPoint>> = bleManager.hourlyActivity
+    val dailyActivity: StateFlow<List<DailyActivityPoint>> = bleManager.dailyActivity
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
@@ -79,6 +85,10 @@ class WatchViewModel : ViewModel() {
 
     fun clearDiagnosticLogs() {
         bleManager.clearDiagnosticLogs()
+    }
+
+    fun clearHealthHistory() {
+        bleManager.clearHealthHistory()
     }
 
     fun startScan() {

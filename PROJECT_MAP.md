@@ -9,7 +9,7 @@
 | Параметр | Значение |
 |---|---|
 | `applicationId` / `namespace` | `com.digma.watchapp` |
-| Текущая версия | `0.1.0` (`versionCode = 9`) |
+| Текущая версия | `0.1.1` (`versionCode = 10`) |
 | Android SDK | `minSdk = 26`, `targetSdk = 35`, `compileSdk = 35` |
 | Стек | Kotlin `2.0.21`, AGP `8.7.3`, Jetpack Compose + Material 3 (BOM `2024.11.00`), Coroutines `1.9.0` |
 | JDK / Gradle | Java `17`, Gradle Wrapper `8.11.1` |
@@ -63,9 +63,10 @@
 
 ### Исходный код (`app/src/main/java/com/digma/watchapp/`)
 
-#### Корневой пакет и модели
-- `DigmaApp.kt` *(110 строк)* — `Application`: хранит `bleManager`, `bleScanner`, `updateManager`, `settings` (`SharedPreferences`), проверяет доступ к уведомлениям (`isNotificationListenerEnabled()`).
-- `model/Models.kt` *(49 строк)* — data-классы `WatchDevice`, `HealthMetrics`, `WatchSettings` (включая `DEFAULT_ALLOWED_PACKAGES`), `ActivityHistoryItem`.
+#### Корневой пакет, модели и локальное хранилище
+- `DigmaApp.kt` — `Application`: хранит `bleManager`, `bleScanner`, `updateManager`, `settings` (`SharedPreferences`), проверяет доступ к уведомлениям (`isNotificationListenerEnabled()`).
+- `model/Models.kt` — data-классы `WatchDevice`, `HealthMetrics`, `WatchSettings` (включая `DEFAULT_ALLOWED_PACKAGES`), `ActivityHistoryItem`, `HeartRateSample`, `HourlyActivityPoint`, `DailyActivityPoint`.
+- `data/HealthHistoryStore.kt` — локальное хранилище истории пульса и почасовой/дневной активности в `SharedPreferences("digma_health_history")` с дедупликацией и хранением за последние 14 дней (до 500 замеров пульса).
 
 #### `ble/` — Bluetooth Low Energy
 - `ble/BleConnectionState.kt` *(9 строк)* — `sealed class BleConnectionState` (`Disconnected`, `Scanning`, `Connecting`, `Connected`, `Syncing`, `Error`).
@@ -76,7 +77,7 @@
   - Команды: `syncTime()`, `syncAll()`, `queryBattery()`, `requestActivity()`, `findWatch()`, `toggleHeartRateMeasurement()`, `sendNotification()`, тестовые методы диагностики.
 
 #### `protocol/` — Кодеки пакетов
-- `protocol/SxrKeepFitCodec.kt` *(496 строк)* — кодек SXR / KeepFit (`000056ff`, характеристики `000033f3` write / `000033f4` notify / `000033f5` / `000033f6`): фиксированные 20-байтовые фреймы (little-endian), handshake (`0x48` AppId, `0x4B` BindInfo), время (`0x01`), спорт/шаги (`0x03`, `0x51`, `0x10`), пульс/`SpO2` (`0x14`, `0x15`, `0x23`, `0x24`, `0x3E`, `0x3F`), уведомления (`0x12`), keepalive (`0x3A`).
+- `protocol/SxrKeepFitCodec.kt` — кодек SXR / KeepFit (`000056ff`, характеристики `000033f3` write / `000033f4` notify / `000033f5` / `000033f6`): фиксированные 20-байтовые фреймы (little-endian), handshake (`0x48` AppId, `0x4B` BindInfo), время (`0x01`), спорт/шаги/история (`0x03`, `0x51`, `0x10`), пульс/`SpO2`/история пульса (`0x14`, `0x15`, `0x16`, `0x23`, `0x24`, `0x27`, `0x3E`, `0x3F`), уведомления (`0x12`), keepalive (`0x3A`).
 - `protocol/DigmaProtocolCodec.kt` *(280 строк)* — legacy-кодек с заголовком `0xAB` (и `0x5A` RX) и XOR-чексуммой: время (`0x01`), поиск часов (`0x09`), пульс (`0x31`), активность (`0x51`), уведомления (`0x72`), батарея (`0x91`), события часов (`0xFE`).
 
 #### `service/` — Системные и фоновые службы
@@ -87,9 +88,10 @@
 #### `ui/` — Интерфейс (Compose + Material 3)
 - `ui/MainActivity.kt` *(177 строк)* — точка входа Activity, запрос runtime-разрешений (BLE, `POST_NOTIFICATIONS`, `REQUEST_INSTALL_PACKAGES`), 4 вкладки (`NavigationTab`: `DASHBOARD`, `SCAN`, `HISTORY`, `SETTINGS`), интеграция `UpdateDialog`.
 - `ui/viewmodel/WatchViewModel.kt` *(135 строк)* — проксирует `StateFlow` и действия между UI, `BleManager`, `BleScanner`, `DigmaApp` и `UpdateManager`.
-- `ui/screens/DashboardScreen.kt` *(415 строк)* — статус часов, батарея, прогресс шагов/калорий/дистанции, пульс и `SpO2`, быстрые действия, pull-to-refresh.
+- `ui/screens/DashboardScreen.kt` — статус часов, батарея, прогресс шагов/калорий/дистанции, пульс (со спарклайном) и `SpO2`, быстрые действия, pull-to-refresh.
 - `ui/screens/ScanScreen.kt` *(656 строк)* — поиск BLE-устройств, подключение/отключение, выбор `WatchProtocolMode`, просмотр GATT-сервисов, терминал диагностических логов и тестовые кнопки.
-- `ui/screens/HistoryScreen.kt` *(137 строк)* — сводка активности и экран статистики.
+- `ui/screens/HistoryScreen.kt` — графики активности (по часам и по дням) и пульса, сводка активности и управление историей.
+- `ui/components/HealthCharts.kt` — Compose Canvas графики `ActivityChartCard`, `HeartRateChartCard` и мини-график `HeartRateSparkline`.
 - `ui/screens/SettingsScreen.kt` *(495 строк)* — настройки часов, доступ к уведомлениям, выбор приложений-мессенджеров / режим «все приложения», тестовое уведомление, блок проверки обновлений.
 - `ui/dialogs/UpdateDialog.kt` *(379 строк)* — диалоги наличия обновления, прогресса загрузки, готовности к установке и ошибок.
 - `ui/theme/Color.kt` *(16 строк)* и `ui/theme/Theme.kt` *(44 строки)* — тёмная и светлая цветовые палитры.
@@ -106,8 +108,9 @@
 - `app/src/main/AndroidManifest.xml` *(71 строка)* — разрешения (BLE 12+ `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT`, legacy BLE+Location `maxSdkVersion=30`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS`, `REQUEST_INSTALL_PACKAGES`, `INTERNET`), объявление `WatchSyncService`, `NotificationCollectorService`, `FileProvider`.
 - `app/src/main/res/` — `drawable/ic_watch.xml`, `values/strings.xml`, `xml/file_paths.xml`.
 - `app/src/test/java/com/digma/watchapp/`:
+  - `data/HealthHistoryAggregationTest.kt`
   - `protocol/DigmaProtocolCodecTest.kt` *(148 строк)*
-  - `protocol/SxrKeepFitCodecTest.kt` *(453 строки)*
+  - `protocol/SxrKeepFitCodecTest.kt`
   - `service/NotificationRelayPolicyTest.kt` *(102 строки)*
   - `update/UpdateVersionCompareTest.kt` *(47 строк)*
 

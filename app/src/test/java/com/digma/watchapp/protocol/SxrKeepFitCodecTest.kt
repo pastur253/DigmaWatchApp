@@ -480,6 +480,42 @@ class SxrKeepFitCodecTest {
             null,
             SxrKeepFitCodec.parseStandardBleHeartRate(byteArrayOf(0x00, 0x00))
         )
+
+        // 0x14 mode=1 echo must NOT be treated as 1 BPM
+        val modeEcho = SxrKeepFitCodec.buildHeartRateStartPacket()
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.CommandAck(SxrKeepFitCodec.CMD_HEART_RATE_START),
+            SxrKeepFitCodec.parseIncomingPacket(modeEcho)
+        )
+
+        // 0x16 HR history query & multi-sample / single-sample decode
+        val hrQuery = SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)
+        assertEquals(SxrKeepFitCodec.CMD_HEART_RATE_HISTORY, hrQuery[0].toInt() and 0xFF)
+        val hrHistory = ByteArray(20).apply {
+            this[0] = 0x16
+            putU32Le(this, 1, 1_700_000_000)
+            this[5] = 68
+            this[6] = 72
+            this[7] = 75
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.HeartRateHistory(1_700_000_000L, listOf(68, 72, 75)),
+            SxrKeepFitCodec.parseIncomingPacket(hrHistory)
+        )
+
+        // 0x27 HR complete with and without BPM
+        val hrCompleteWithBpm = ByteArray(20).apply {
+            this[0] = 0x27
+            this[5] = 81
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.HeartRateComplete(81),
+            SxrKeepFitCodec.parseIncomingPacket(hrCompleteWithBpm)
+        )
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.HeartRateComplete(0),
+            SxrKeepFitCodec.parseIncomingPacket(ByteArray(20).apply { this[0] = 0x27 })
+        )
     }
 
     private fun decodeNullTerminatedUtf8(frame: ByteArray, offset: Int): String {

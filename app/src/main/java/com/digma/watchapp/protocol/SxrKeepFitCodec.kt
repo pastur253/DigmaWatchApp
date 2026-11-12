@@ -93,6 +93,11 @@ object SxrKeepFitCodec {
             val baseEpochSeconds: Long,
             val stepSamples: List<Int>
         ) : SxrEvent()
+        data class HeartRateHistory(
+            val baseEpochSeconds: Long,
+            val bpmSamples: List<Int>
+        ) : SxrEvent()
+        data class HeartRateComplete(val heartRateBpm: Int) : SxrEvent()
         data class CommandAck(val opcode: Int) : SxrEvent()
         data class CommandError(val opcode: Int) : SxrEvent()
         data class Unknown(val opcode: Int, val payload: ByteArray) : SxrEvent() {
@@ -166,6 +171,16 @@ object SxrKeepFitCodec {
     fun buildDeviceInfoQueryPacket(): ByteArray = frame(CMD_DEVICE_INFO)
 
     fun buildActivityQueryPacket(): ByteArray = frame(CMD_CURRENT_SPORT)
+
+    fun buildActivityHistoryQueryPacket(sinceEpochSeconds: Long = 0L): ByteArray =
+        frame(CMD_ACTIVITY_HISTORY) { packet ->
+            writeU32Le(packet, 1, sinceEpochSeconds)
+        }
+
+    fun buildHeartRateHistoryQueryPacket(sinceEpochSeconds: Long = 0L): ByteArray =
+        frame(CMD_HEART_RATE_HISTORY) { packet ->
+            writeU32Le(packet, 1, sinceEpochSeconds)
+        }
 
     fun buildBandFunctionQueryPacket(): ByteArray = frame(CMD_BAND_FUNCTION)
 
@@ -266,11 +281,12 @@ object SxrKeepFitCodec {
             CMD_GOAL,
             CMD_SENSOR_MODE,
             0x25,
-            CMD_HR_COMPLETE,
             CMD_SPO2_COMPLETE,
             CMD_KEEPALIVE -> SxrEvent.CommandAck(opcode)
+            CMD_HR_COMPLETE -> parseHeartRateComplete(data)
             CMD_CURRENT_SPORT -> parseCurrentSport(data, preferThreeByteSport)
             CMD_ACTIVITY_HISTORY -> parseActivityHistory(data)
+            CMD_HEART_RATE_HISTORY -> parseHeartRateHistory(data)
             CMD_FIND_WATCH -> SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.FindWatchAck)
             CMD_WATCH_ACTION -> parseWatchAction(data)
             CMD_LOCATION_ACTION -> SxrEvent.Standard(
@@ -410,10 +426,10 @@ object SxrKeepFitCodec {
         }
         val ts = u32le(data, 1)
         val bpm = data[5].toInt() and 0xFF
-        if (bpm > 0) {
+        if (bpm in 25..250) {
             return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0))
         }
-        if (ts == 0L) return SxrEvent.CommandError(CMD_HEART_RATE_START)
+        if (ts == 0L && bpm == 0) return SxrEvent.CommandError(CMD_HEART_RATE_START)
         val compactBpm = data[2].toInt() and 0xFF
         if (ts in 1L..3L && compactBpm in 25..250) {
             return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(compactBpm, 0))
@@ -421,9 +437,50 @@ object SxrKeepFitCodec {
         return SxrEvent.CommandAck(CMD_HEART_RATE_START)
     }
 
+    private fun parseHeartRateHistory(data: ByteArray): SxrEvent {
+        if (data.size < 2) return SxrEvent.Unknown(CMD_HEART_RATE_HISTORY, data)
+        if (data.size < 6) {
+            val compactBpm = data[1].toInt() and 0xFF
+            val samples = if (compactBpm in 25..250) listOf(compactBpm) else emptyList()
+            return SxrEvent.HeartRateHistory(baseEpochSeconds = 0L, bpmSamples = samples)
+        }
+        val baseEpochSeconds = u32le(data, 1)
+        val tailSamples = (5 until data.size)
+            .map { data[it].toInt() and 0xFF }
+            .filter { it in 25..250 }
+        val samples = if (tailSamples.isNotEmpty()) {
+            tailSamples
+        } else if ((data[2].toInt() == 0 && data[3].toInt() == 0 && data[4].toInt() == 0) &&
+            (data[1].toInt() and 0xFF) in 25..250
+        ) {
+            listOf(data[1].toInt() and 0xFF)
+        } else {
+            emptyList()
+        }
+        return SxrEvent.HeartRateHistory(baseEpochSeconds = baseEpochSeconds, bpmSamples = samples)
+    }
+
+    private fun parseHeartRateComplete(data: ByteArray): SxrEvent {
+        val tailBpm = if (data.size >= 6) data[5].toInt() and 0xFF else 0
+        val compactBpm = if (data.size >= 5 && data[2].toInt() == 0 && data[3].toInt() == 0 && data[4].toInt() == 0) {
+            data[1].toInt() and 0xFF
+        } else if (data.size in 2..4) {
+            data[1].toInt() and 0xFF
+        } else {
+            0
+        }
+        val bpm = when {
+            tailBpm in 25..250 -> tailBpm
+            compactBpm in 25..250 -> compactBpm
+            else -> 0
+        }
+        return SxrEvent.HeartRateComplete(heartRateBpm = bpm)
+    }
+
     private fun parseCombinedSensor(data: ByteArray): SxrEvent {
         if (data.size < 6) return SxrEvent.Unknown(CMD_COMBINED_SENSOR, data)
-        val hr = data[1].toInt() and 0xFF
+        val hrRaw = data[1].toInt() and 0xFF
+        val hr = if (hrRaw in 25..250) hrRaw else 0
         val systolic = data[2].toInt() and 0xFF
         val diastolic = data[3].toInt() and 0xFF
         val spo2Raw = data[4].toInt() and 0xFF
