@@ -9,7 +9,7 @@
 | Параметр | Значение |
 |---|---|
 | `applicationId` / `namespace` | `com.digma.watchapp` |
-| Текущая версия | `0.1.1` (`versionCode = 10`) |
+| Текущая версия | `0.1.2` (`versionCode = 11`) |
 | Android SDK | `minSdk = 26`, `targetSdk = 35`, `compileSdk = 35` |
 | Стек | Kotlin `2.0.21`, AGP `8.7.3`, Jetpack Compose + Material 3 (BOM `2024.11.00`), Coroutines `1.9.0` |
 | JDK / Gradle | Java `17`, Gradle Wrapper `8.11.1` |

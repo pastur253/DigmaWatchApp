@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -66,17 +67,40 @@ class WatchSyncService : Service() {
         syncJob?.cancel()
         syncJob = serviceScope.launch {
             val bleManager = DigmaApp.instance.bleManager
+            bleManager.connectSavedDeviceIfNeeded()
 
             launch {
-                bleManager.connectionState.collect { state ->
-                    val text = when (state) {
+                combine(
+                    bleManager.connectionState,
+                    bleManager.isAutoReconnecting,
+                    bleManager.savedDevice
+                ) { state, reconnecting, saved ->
+                    when (state) {
                         is BleConnectionState.Connected -> "Подключено: ${state.deviceName}"
-                        is BleConnectionState.Connecting -> "Подключение к часам..."
+                        is BleConnectionState.Connecting -> "Подключение: ${state.deviceName}"
                         is BleConnectionState.Syncing -> "Синхронизация данных..."
-                        is BleConnectionState.Disconnected -> "Часы отключены"
-                        else -> "Ожидание..."
+                        is BleConnectionState.Disconnected,
+                        is BleConnectionState.Error -> when {
+                            reconnecting && saved != null -> "Переподключение к ${saved.name}..."
+                            saved != null -> "Ожидание часов: ${saved.name}"
+                            else -> "Часы не выбраны"
+                        }
+                        BleConnectionState.Scanning -> "Поиск часов..."
                     }
+                }.collect { text ->
                     updateNotification(text)
+                }
+            }
+
+            // Reconnect watchdog every 60s when saved watch is disconnected
+            launch {
+                while (isActive) {
+                    delay(60_000L)
+                    if (bleManager.connectionState.value is BleConnectionState.Disconnected ||
+                        bleManager.connectionState.value is BleConnectionState.Error
+                    ) {
+                        bleManager.connectSavedDeviceIfNeeded()
+                    }
                 }
             }
 

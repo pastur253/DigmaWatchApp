@@ -66,6 +66,8 @@ fun ScanScreen(viewModel: WatchViewModel) {
     val isScanning by viewModel.isScanning.collectAsState()
     val devices by viewModel.discoveredDevices.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
+    val savedDevice by viewModel.savedDevice.collectAsState()
+    val isAutoReconnecting by viewModel.isAutoReconnecting.collectAsState()
 
     Column(
         modifier = Modifier
@@ -161,6 +163,62 @@ fun ScanScreen(viewModel: WatchViewModel) {
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
+        } else if (savedDevice != null) {
+            val saved = savedDevice!!
+            val isConnectingSaved = connectionState is BleConnectionState.Connecting || isAutoReconnecting
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Сохранённые часы: ${saved.name}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (isConnectingSaved) {
+                                "${saved.address} • переподключение..."
+                            } else {
+                                saved.address
+                            },
+                            fontSize = 11.sp,
+                            color = if (isConnectingSaved) StatusConnecting else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.forgetSavedDevice() },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Забыть", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                        }
+                        Button(
+                            onClick = { viewModel.connectSavedDevice() },
+                            enabled = connectionState !is BleConnectionState.Connecting,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                        ) {
+                            Text(
+                                text = if (connectionState is BleConnectionState.Connecting) "..." else "Подкл.",
+                                color = Color.Black,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
         }
 
         // --- Device List (Flexible Area) ---
@@ -524,6 +582,15 @@ fun DiagnosticSection(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
                         Text("PPG 0x23", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
+                    }
+
+                    Button(
+                        onClick = { viewModel.queryHeartRateHistory() },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("HR 0x16", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSecondary)
                     }
 
                     OutlinedButton(

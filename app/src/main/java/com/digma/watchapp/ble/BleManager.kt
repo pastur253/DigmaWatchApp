@@ -1,5 +1,6 @@
 package com.digma.watchapp.ble
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -10,14 +11,24 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.digma.watchapp.data.HealthHistoryStore
 import com.digma.watchapp.model.DailyActivityPoint
 import com.digma.watchapp.model.HealthMetrics
 import com.digma.watchapp.model.HeartRateSample
 import com.digma.watchapp.model.HourlyActivityPoint
+import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.protocol.DigmaProtocolCodec
 import com.digma.watchapp.protocol.SxrKeepFitCodec
 import kotlinx.coroutines.CompletableDeferred
@@ -57,6 +68,15 @@ class BleManager(private val context: Context) {
         private const val MAX_DIAGNOSTIC_LOGS = 400
         private const val GATT_OP_TIMEOUT_MS = 1500L
         private const val SXR_KEEPALIVE_INTERVAL_MS = 15_000L
+        private const val CONNECT_TIMEOUT_MS = 20_000L
+        private const val SCAN_WAKEUP_TIMEOUT_MS = 4_000L
+        private const val MAX_FAILED_KEEPALIVES = 3
+        private val RECONNECT_DELAYS_MS = longArrayOf(1_500L, 3_000L, 6_000L, 12_000L, 20_000L, 30_000L)
+
+        private const val PREFS_BLE = "digma_ble_prefs"
+        private const val KEY_SAVED_ADDRESS = "saved_device_address"
+        private const val KEY_SAVED_NAME = "saved_device_name"
+        private const val KEY_MANUAL_DISCONNECT = "manual_disconnect"
 
         private val CLIENT_CHARACTERISTIC_CONFIG: UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -113,12 +133,28 @@ class BleManager(private val context: Context) {
     private var setupJob: Job? = null
     private var keepaliveJob: Job? = null
     private var hrFallbackJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var connectTimeoutJob: Job? = null
     @Volatile
     private var receivedHrSampleInCurrentSession = false
+    @Volatile
+    private var receivedHrHistoryInCurrentSync = false
+    @Volatile
+    private var receivedActivityHistoryInCurrentSync = false
     @Volatile
     private var confirmedThreeByteSportLayout: Boolean? = null
     @Volatile
     private var lastStepCounterRefreshMs = 0L
+    @Volatile
+    private var isPassiveAutoConnecting = false
+    @Volatile
+    private var reconnectAttempt = 0
+    @Volatile
+    private var consecutiveFailedKeepalives = 0
+
+    private val blePrefs = context.getSharedPreferences(PREFS_BLE, Context.MODE_PRIVATE)
+    @Volatile
+    private var manualDisconnect = blePrefs.getBoolean(KEY_MANUAL_DISCONNECT, false)
 
     @Volatile
     private var pendingDescriptorWrite: CompletableDeferred<Int>? = null
@@ -160,6 +196,39 @@ class BleManager(private val context: Context) {
     private val _deviceFirmware = MutableStateFlow<String?>(null)
     val deviceFirmware: StateFlow<String?> = _deviceFirmware.asStateFlow()
 
+    private val _savedDevice = MutableStateFlow(loadSavedDeviceFromPrefs())
+    val savedDevice: StateFlow<WatchDevice?> = _savedDevice.asStateFlow()
+
+    private val _isAutoReconnecting = MutableStateFlow(false)
+    val isAutoReconnecting: StateFlow<Boolean> = _isAutoReconnecting.asStateFlow()
+
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            when (state) {
+                BluetoothAdapter.STATE_TURNING_OFF,
+                BluetoothAdapter.STATE_OFF -> {
+                    logDiagnostic("Bluetooth выключен системой — сброс активного GATT")
+                    reconnectJob?.cancel()
+                    connectTimeoutJob?.cancel()
+                    _isAutoReconnecting.value = false
+                    teardownActiveGatt(closeGatt = true)
+                    _connectionState.value = BleConnectionState.Disconnected
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    logDiagnostic("Bluetooth включён — проверка автоподключения")
+                    if (!manualDisconnect && _savedDevice.value != null) {
+                        scope.launch {
+                            delay(600L)
+                            connectSavedDeviceIfNeeded()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private val historyStore = HealthHistoryStore(context)
     val heartRateHistory: StateFlow<List<HeartRateSample>> = historyStore.heartRateHistory
     val hourlyActivity: StateFlow<List<HourlyActivityPoint>> = historyStore.hourlyActivity
@@ -172,6 +241,12 @@ class BleManager(private val context: Context) {
     private var notificationUidCounter = 1
 
     init {
+        ContextCompat.registerReceiver(
+            context,
+            btStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED
+        )
         scope.launch {
             for ((gen, action) in commandQueue) {
                 if (gen == connectionGeneration) {
@@ -182,6 +257,51 @@ class BleManager(private val context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    private fun loadSavedDeviceFromPrefs(): WatchDevice? {
+        val address = blePrefs.getString(KEY_SAVED_ADDRESS, null) ?: return null
+        val name = blePrefs.getString(KEY_SAVED_NAME, null) ?: "Digma Smartline D3"
+        return WatchDevice(name = name, address = address, rssi = 0, isConnected = false)
+    }
+
+    private fun saveDeviceToPrefs(address: String, name: String?) {
+        val existingName = blePrefs.getString(KEY_SAVED_NAME, null)
+        val resolvedName = name?.takeIf { it.isNotBlank() && it != "Unknown" && it != "Digma Watch" }
+            ?: existingName
+            ?: "Digma Smartline D3"
+        blePrefs.edit()
+            .putString(KEY_SAVED_ADDRESS, address)
+            .putString(KEY_SAVED_NAME, resolvedName)
+            .putBoolean(KEY_MANUAL_DISCONNECT, false)
+            .apply()
+        manualDisconnect = false
+        _savedDevice.value = WatchDevice(
+            name = resolvedName,
+            address = address,
+            rssi = 0,
+            isConnected = _connectionState.value is BleConnectionState.Connected
+        )
+    }
+
+    private fun hasBluetoothConnectPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun hasBluetoothScanPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -224,33 +344,61 @@ class BleManager(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
-            val device = gatt?.device ?: return
-            val name = device.name ?: "Digma Smartline D3"
+            val nonNullGatt = gatt ?: return
+            val device = nonNullGatt.device ?: return
+            val name = device.name ?: _savedDevice.value?.name ?: "Digma Smartline D3"
             val address = device.address
+
+            if (activeGatt != null && nonNullGatt !== activeGatt) {
+                logDiagnostic("Игнорируем callback устаревшего GATT ($address, state=$newState, status=$status)")
+                try {
+                    nonNullGatt.close()
+                } catch (_: Exception) {
+                }
+                return
+            }
 
             logDiagnostic("onConnectionStateChange: newState=$newState, status=$status")
 
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    connectTimeoutJob?.cancel()
+                    connectTimeoutJob = null
+                    isPassiveAutoConnecting = false
                     if (status == BluetoothGatt.GATT_SUCCESS) {
+                        reconnectJob?.cancel()
+                        reconnectJob = null
+                        reconnectAttempt = 0
+                        _isAutoReconnecting.value = false
+                        saveDeviceToPrefs(address, device.name)
                         val gen = connectionGeneration
                         _connectionState.value = BleConnectionState.Connecting(address, "$name (поиск сервисов...)")
                         logDiagnostic("BLE связь установлена. Запуск discoverServices()...")
                         scope.launch {
                             delay(300)
-                            if (gen == connectionGeneration && activeGatt === gatt) {
-                                gatt.discoverServices()
+                            if (gen == connectionGeneration && activeGatt === nonNullGatt) {
+                                nonNullGatt.discoverServices()
                             }
                         }
                     } else {
                         logDiagnostic("Ошибка подключения: status=$status")
-                        disconnect()
+                        teardownActiveGatt(closeGatt = true, explicitGatt = nonNullGatt)
+                        _connectionState.value = BleConnectionState.Disconnected
+                        if (!manualDisconnect) {
+                            scheduleReconnect("Ошибка подключения (status=$status)")
+                        }
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    connectTimeoutJob?.cancel()
+                    connectTimeoutJob = null
+                    isPassiveAutoConnecting = false
                     logDiagnostic("Отключено от $address (status=$status)")
-                    cleanup()
+                    teardownActiveGatt(closeGatt = true, explicitGatt = nonNullGatt)
                     _connectionState.value = BleConnectionState.Disconnected
+                    if (!manualDisconnect) {
+                        scheduleReconnect("Разрыв связи (status=$status)")
+                    }
                 }
                 else -> Unit
             }
@@ -258,13 +406,20 @@ class BleManager(private val context: Context) {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-            val device = gatt?.device ?: return
-            val name = device.name ?: "Digma Smartline D3"
+            val nonNullGatt = gatt ?: return
+            val device = nonNullGatt.device ?: return
+            val name = device.name ?: _savedDevice.value?.name ?: "Digma Smartline D3"
             val address = device.address
+
+            if (activeGatt != null && nonNullGatt !== activeGatt) return
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 logDiagnostic("Ошибка discoverServices: status=$status")
                 _connectionState.value = BleConnectionState.Error("Ошибка обнаружения сервисов ($status)")
+                if (!manualDisconnect) {
+                    teardownActiveGatt(closeGatt = true, explicitGatt = nonNullGatt)
+                    scheduleReconnect("Ошибка discoverServices ($status)")
+                }
                 return
             }
 
@@ -399,6 +554,8 @@ class BleManager(private val context: Context) {
     private suspend fun runInitialSyncSuspend(gen: Long) {
         if (gen != connectionGeneration) return
         _isSyncing.value = true
+        receivedHrHistoryInCurrentSync = false
+        receivedActivityHistoryInCurrentSync = false
         try {
             delay(200)
             activeGatt?.let { readStandardBatteryIfAvailable(it) }
@@ -419,6 +576,28 @@ class BleManager(private val context: Context) {
                     ),
                     delayBetweenMs = 80L
                 )
+                delay(750)
+                if (gen == connectionGeneration && effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
+                    val midnightEpoch = SxrKeepFitCodec.localMidnightEpochSeconds()
+                    val dayAgoEpoch = (SxrKeepFitCodec.localEpochSeconds() - 86_400L).coerceAtLeast(0L)
+                    if (!receivedActivityHistoryInCurrentSync) {
+                        sendPacketsSuspend(
+                            listOf(SxrKeepFitCodec.buildActivityHistoryQueryPacket(midnightEpoch)),
+                            delayBetweenMs = 0L
+                        )
+                    }
+                    if (!receivedHrHistoryInCurrentSync) {
+                        logDiagnostic("SXR: Повторный запрос истории пульса (за сегодня и 24ч)...")
+                        sendPacketsSuspend(
+                            listOf(
+                                SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(midnightEpoch),
+                                SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(dayAgoEpoch)
+                            ),
+                            delayBetweenMs = 120L
+                        )
+                        delay(450)
+                    }
+                }
             } else {
                 logDiagnostic("0xAB: Синхронизация времени, АКБ, активности...")
                 syncTimeLegacySuspend()
@@ -435,61 +614,291 @@ class BleManager(private val context: Context) {
 
     private fun startKeepaliveLoop(gen: Long) {
         keepaliveJob?.cancel()
+        consecutiveFailedKeepalives = 0
         keepaliveJob = scope.launch {
             while (isActive && gen == connectionGeneration && activeGatt != null) {
                 delay(SXR_KEEPALIVE_INTERVAL_MS)
                 if (gen != connectionGeneration || activeGatt == null) break
                 if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
-                    sendPacketsSuspend(listOf(SxrKeepFitCodec.buildKeepalivePacket()), delayBetweenMs = 0L)
+                    val ok = sendPacketsSuspend(listOf(SxrKeepFitCodec.buildKeepalivePacket()), delayBetweenMs = 0L)
+                    if (ok) {
+                        consecutiveFailedKeepalives = 0
+                    } else {
+                        consecutiveFailedKeepalives++
+                        if (consecutiveFailedKeepalives >= MAX_FAILED_KEEPALIVES &&
+                            gen == connectionGeneration &&
+                            activeGatt != null
+                        ) {
+                            logDiagnostic("Keepalive не отвечает ($MAX_FAILED_KEEPALIVES раза), сброс и переподключение...")
+                            teardownActiveGatt(closeGatt = true)
+                            _connectionState.value = BleConnectionState.Disconnected
+                            if (!manualDisconnect) {
+                                scheduleReconnect("Потеря отклика keepalive")
+                            }
+                            break
+                        }
+                    }
                 }
             }
         }
     }
 
     @SuppressLint("MissingPermission")
-    fun connect(address: String) {
-        val adapter = bluetoothAdapter ?: return
+    fun connect(address: String, deviceName: String? = null) {
+        saveDeviceToPrefs(address, deviceName)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempt = 0
+        _isAutoReconnecting.value = false
+        initiateGattConnect(address, autoConnect = false)
+    }
+
+    fun connectSavedDevice(): Boolean {
+        val saved = _savedDevice.value ?: return false
+        manualDisconnect = false
+        blePrefs.edit().putBoolean(KEY_MANUAL_DISCONNECT, false).apply()
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempt = 0
+        _isAutoReconnecting.value = false
+        return initiateGattConnect(saved.address, autoConnect = false)
+    }
+
+    fun connectSavedDeviceIfNeeded(): Boolean {
+        val saved = _savedDevice.value ?: return false
+        if (manualDisconnect) return false
+        val adapter = bluetoothAdapter ?: return false
+        if (!adapter.isEnabled || !hasBluetoothConnectPermission()) return false
+        if (activeGatt != null) return true
+        if (_isAutoReconnecting.value && reconnectJob?.isActive == true) return true
+        logDiagnostic("Автоподключение к сохранённым часам ${saved.name} (${saved.address})...")
+        return initiateGattConnect(saved.address, autoConnect = false)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun initiateGattConnect(address: String, autoConnect: Boolean): Boolean {
+        val adapter = bluetoothAdapter ?: return false
         if (!adapter.isEnabled) {
             logDiagnostic("Bluetooth выключен!")
-            return
+            return false
+        }
+        if (!hasBluetoothConnectPermission()) {
+            logDiagnostic("Нет разрешения BLUETOOTH_CONNECT для подключения.")
+            return false
         }
 
         val device = try {
             adapter.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
             _connectionState.value = BleConnectionState.Error("Неверный Bluetooth адрес")
-            return
+            return false
         }
 
-        disconnect()
-        val gen = connectionGeneration
-        _connectionState.value = BleConnectionState.Connecting(address, device.name ?: "Digma Watch")
-        logDiagnostic("Подключение к $address (${device.name ?: "Unknown"})...")
+        val hadPreviousGatt = activeGatt != null
+        teardownActiveGatt(closeGatt = true)
+        connectTimeoutJob?.cancel()
 
-        val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        if (gen == connectionGeneration) {
-            activeGatt = gatt
-        } else {
-            gatt?.close()
+        val displayName = device.name ?: _savedDevice.value?.name ?: "Digma Smartline D3"
+        val gen = connectionGeneration
+        isPassiveAutoConnecting = autoConnect
+        _connectionState.value = BleConnectionState.Connecting(
+            address,
+            if (autoConnect) "$displayName (ожидание сигнала...)" else displayName
+        )
+
+        scope.launch {
+            if (hadPreviousGatt) {
+                delay(220L)
+            }
+            if (gen != connectionGeneration || activeGatt != null) return@launch
+            if (!adapter.isEnabled || !hasBluetoothConnectPermission()) return@launch
+
+            logDiagnostic("Подключение к $address ($displayName, autoConnect=$autoConnect)...")
+            val gatt = try {
+                device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            } catch (e: SecurityException) {
+                logDiagnostic("Нет разрешения BLE: ${e.localizedMessage}")
+                null
+            } catch (e: Exception) {
+                logDiagnostic("Ошибка connectGatt: ${e.localizedMessage}")
+                null
+            }
+
+            if (gatt == null) {
+                _connectionState.value = BleConnectionState.Disconnected
+                if (!manualDisconnect) {
+                    scheduleReconnect("connectGatt вернул null")
+                }
+                return@launch
+            }
+
+            if (gen == connectionGeneration) {
+                activeGatt = gatt
+                if (!autoConnect) {
+                    startConnectTimeoutWatchdog(gen, address)
+                }
+            } else {
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+            }
+        }
+        return true
+    }
+
+    private fun startConnectTimeoutWatchdog(gen: Long, address: String) {
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = scope.launch {
+            delay(CONNECT_TIMEOUT_MS)
+            if (gen == connectionGeneration &&
+                _connectionState.value is BleConnectionState.Connecting &&
+                !isPassiveAutoConnecting
+            ) {
+                logDiagnostic("Таймаут подключения к $address (${CONNECT_TIMEOUT_MS / 1000}с)")
+                teardownActiveGatt(closeGatt = true)
+                _connectionState.value = BleConnectionState.Disconnected
+                if (!manualDisconnect) {
+                    scheduleReconnect("Таймаут подключения")
+                }
+            }
+        }
+    }
+
+    private fun scheduleReconnect(reason: String) {
+        val saved = _savedDevice.value ?: return
+        if (manualDisconnect) return
+        val adapter = bluetoothAdapter ?: return
+        if (!adapter.isEnabled) {
+            _isAutoReconnecting.value = false
+            return
+        }
+        if (reconnectJob?.isActive == true) return
+
+        _isAutoReconnecting.value = true
+        reconnectJob = scope.launch {
+            try {
+                val idx = reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
+                val delayMs = RECONNECT_DELAYS_MS[idx]
+                reconnectAttempt++
+                logDiagnostic("Автопереподключение к ${saved.name} через ${delayMs / 1000.0}с (попытка #$reconnectAttempt, причина: $reason)")
+                delay(delayMs)
+
+                if (!isActive || manualDisconnect || _savedDevice.value == null) return@launch
+                if (!adapter.isEnabled || !hasBluetoothConnectPermission()) return@launch
+                if (activeGatt != null) return@launch
+
+                val remoteDevice = try {
+                    adapter.getRemoteDevice(saved.address)
+                } catch (_: Exception) {
+                    null
+                }
+                if (remoteDevice != null &&
+                    (reconnectAttempt >= 2 || remoteDevice.type == BluetoothDevice.DEVICE_TYPE_UNKNOWN) &&
+                    hasBluetoothScanPermission()
+                ) {
+                    primeBleAddressViaFilteredScan(saved.address)
+                }
+
+                if (!isActive || manualDisconnect || activeGatt != null) return@launch
+                val useAutoConnect = reconnectAttempt >= 4
+                initiateGattConnect(saved.address, autoConnect = useAutoConnect)
+            } finally {
+                if (activeGatt != null && _connectionState.value is BleConnectionState.Connected) {
+                    _isAutoReconnecting.value = false
+                } else if (manualDisconnect) {
+                    _isAutoReconnecting.value = false
+                }
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
-    fun disconnect() {
+    private suspend fun primeBleAddressViaFilteredScan(address: String) {
+        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
+        val found = CompletableDeferred<Boolean>()
+        val filter = ScanFilter.Builder().setDeviceAddress(address).build()
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                if (result?.device?.address.equals(address, ignoreCase = true)) {
+                    found.complete(true)
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                found.complete(false)
+            }
+        }
+
         try {
-            activeGatt?.disconnect()
-            activeGatt?.close()
+            logDiagnostic("Точечный BLE-поиск $address для восстановления канала...")
+            scanner.startScan(listOf(filter), settings, callback)
+            withTimeoutOrNull(SCAN_WAKEUP_TIMEOUT_MS) { found.await() }
+        } catch (_: Exception) {
+        } finally {
+            try {
+                scanner.stopScan(callback)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun disconnect(byUser: Boolean = true) {
+        if (byUser) {
+            manualDisconnect = true
+            blePrefs.edit().putBoolean(KEY_MANUAL_DISCONNECT, true).apply()
+            reconnectJob?.cancel()
+            reconnectJob = null
+            reconnectAttempt = 0
+            _isAutoReconnecting.value = false
+        }
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
+        isPassiveAutoConnecting = false
+        teardownActiveGatt(closeGatt = true)
+        _connectionState.value = BleConnectionState.Disconnected
+        logDiagnostic(if (byUser) "Отключено пользователем." else "Отключено.")
+    }
+
+    fun forgetSavedDevice() {
+        disconnect(byUser = true)
+        blePrefs.edit().clear().apply()
+        manualDisconnect = false
+        _savedDevice.value = null
+        logDiagnostic("Сохранённые часы удалены.")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun teardownActiveGatt(closeGatt: Boolean, explicitGatt: BluetoothGatt? = null) {
+        val target = explicitGatt ?: activeGatt
+        try {
+            if (closeGatt && target != null) {
+                try {
+                    target.disconnect()
+                } catch (_: Exception) {
+                }
+                try {
+                    target.close()
+                } catch (_: Exception) {
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error closing GATT", e)
         } finally {
             cleanup()
-            _connectionState.value = BleConnectionState.Disconnected
-            logDiagnostic("Отключено.")
         }
     }
 
     private fun cleanup() {
         connectionGeneration++
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
+        isPassiveAutoConnecting = false
+        consecutiveFailedKeepalives = 0
         setupJob?.cancel()
         setupJob = null
         keepaliveJob?.cancel()
@@ -898,6 +1307,7 @@ class BleManager(private val context: Context) {
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.ActivityBuckets -> {
+                    receivedActivityHistoryInCurrentSync = true
                     val sumSteps = sxr.stepSamples.sum()
                     logDiagnostic("RX SXR Бакеты активности (0x10): +$sumSteps шагов (${sxr.stepSamples.size} мин)")
                     historyStore.recordActivityBuckets(sxr.baseEpochSeconds, sxr.stepSamples)
@@ -905,12 +1315,14 @@ class BleManager(private val context: Context) {
                     return
                 }
                 is SxrKeepFitCodec.SxrEvent.HeartRateHistory -> {
+                    receivedHrHistoryInCurrentSync = true
                     val lastBpm = sxr.bpmSamples.lastOrNull()
                     logDiagnostic(
                         "RX SXR История пульса (0x16): замеров=${sxr.bpmSamples.size}, посл=${lastBpm ?: 0} уд/мин"
                     )
                     historyStore.recordHeartRateBatch(sxr.baseEpochSeconds, sxr.bpmSamples)
                     if (lastBpm != null) {
+                        _healthMetrics.update { it.copy(isMeasuringHeartRate = false) }
                         updateFromStandardPacket(
                             DigmaProtocolCodec.IncomingPacket.HeartRate(lastBpm, 0),
                             recordToHistory = false
@@ -1289,37 +1701,62 @@ class BleManager(private val context: Context) {
 
     private fun startHeartRateFallbackSequence(gen: Long) {
         hrFallbackJob = scope.launch {
-            val probes = listOf(
-                Triple(1_800L, "0x14 (ref=1, mode=1)") {
-                    SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 1L, mode = 1)
-                },
-                Triple(1_800L, "0x14 (ref=0, mode=1)") {
-                    SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 0L, mode = 1)
-                },
-                Triple(1_800L, "PPG 0x23 (mode=1)") {
+            // Give the optical PPG sensor on the watch time to lock without resetting mode=0/ref=0.
+            delay(8_000L)
+            if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
+            if (!_healthMetrics.value.isMeasuringHeartRate || receivedHrSampleInCurrentSession) return@launch
+
+            logDiagnostic("SXR HR: опрашиваем буфер пульса (0x16)...")
+            receivedHrHistoryInCurrentSync = false
+            enqueueCommand(gen) {
+                sendPacketsSuspend(
+                    listOf(
+                        SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L),
+                        SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(SxrKeepFitCodec.localMidnightEpochSeconds())
+                    ),
+                    delayBetweenMs = 120L
+                )
+            }
+
+            val fallbackProbes = listOf(
+                Triple(5_000L, "PPG 0x23 (mode=1)") {
                     SxrKeepFitCodec.buildCombinedMeasurementStartPacket(mode = 1)
                 },
-                Triple(2_200L, "PPG 0x23 (mode=2)") {
+                Triple(10_000L, "0x14 (ref=1, mode=1)") {
+                    SxrKeepFitCodec.buildHeartRateModePacket(referenceValue = 1L, mode = 1)
+                },
+                Triple(8_000L, "PPG 0x23 (mode=2)") {
                     SxrKeepFitCodec.buildCombinedMeasurementStartPacket(mode = 2)
                 }
             )
-            for ((waitMs, label, builder) in probes) {
+            for ((waitMs, label, builder) in fallbackProbes) {
                 delay(waitMs)
                 if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
                 if (!_healthMetrics.value.isMeasuringHeartRate || receivedHrSampleInCurrentSession) return@launch
-                logDiagnostic("SXR HR: нет ответа, пробуем $label...")
+                logDiagnostic("SXR HR: пробуем альтернативный режим $label...")
                 enqueueCommand(gen) {
                     sendPacketsSuspend(listOf(builder()), delayBetweenMs = 0L)
                 }
             }
-            delay(4_500L)
+
+            delay(7_000L)
             if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
             if (!_healthMetrics.value.isMeasuringHeartRate || receivedHrSampleInCurrentSession) return@launch
-            logDiagnostic("SXR HR: опрашиваем историю пульса (0x16)...")
+
+            logDiagnostic("SXR HR: финальный опрос истории пульса (0x16)...")
             enqueueCommand(gen) {
-                sendPacketsSuspend(listOf(SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)), delayBetweenMs = 0L)
+                sendPacketsSuspend(
+                    listOf(
+                        SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L),
+                        SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(
+                            (SxrKeepFitCodec.localEpochSeconds() - 86_400L).coerceAtLeast(0L)
+                        )
+                    ),
+                    delayBetweenMs = 120L
+                )
             }
-            delay(4_000L)
+
+            delay(3_000L)
             if (!isActive || gen != connectionGeneration || activeGatt == null) return@launch
             if (_healthMetrics.value.isMeasuringHeartRate && !receivedHrSampleInCurrentSession) {
                 logDiagnostic("SXR HR: таймаут ожидания замера пульса")
@@ -1339,11 +1776,24 @@ class BleManager(private val context: Context) {
 
     fun queryHeartRateHistory(): Boolean {
         if (!canTransmit()) return false
-        logDiagnostic("Команда: Запрос истории пульса...")
+        logDiagnostic("Команда: Запрос истории пульса (0x16)...")
+        receivedHrHistoryInCurrentSync = false
         val gen = connectionGeneration
         enqueueCommand(gen) {
             if (effectiveProtocol() == WatchProtocolMode.SXR_KEEPFIT) {
                 sendPacketsSuspend(listOf(SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(0L)), delayBetweenMs = 0L)
+                delay(650L)
+                if (!receivedHrHistoryInCurrentSync && gen == connectionGeneration) {
+                    sendPacketsSuspend(
+                        listOf(
+                            SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(SxrKeepFitCodec.localMidnightEpochSeconds()),
+                            SxrKeepFitCodec.buildHeartRateHistoryQueryPacket(
+                                (SxrKeepFitCodec.localEpochSeconds() - 86_400L).coerceAtLeast(0L)
+                            )
+                        ),
+                        delayBetweenMs = 120L
+                    )
+                }
             }
         }
         return true

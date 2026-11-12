@@ -42,6 +42,8 @@ class WatchViewModel : ViewModel() {
     val heartRateHistory: StateFlow<List<HeartRateSample>> = bleManager.heartRateHistory
     val hourlyActivity: StateFlow<List<HourlyActivityPoint>> = bleManager.hourlyActivity
     val dailyActivity: StateFlow<List<DailyActivityPoint>> = bleManager.dailyActivity
+    val savedDevice: StateFlow<WatchDevice?> = bleManager.savedDevice
+    val isAutoReconnecting: StateFlow<Boolean> = bleManager.isAutoReconnecting
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
@@ -101,11 +103,24 @@ class WatchViewModel : ViewModel() {
 
     fun connect(device: WatchDevice) {
         bleScanner.stopScan()
-        bleManager.connect(device.address)
+        bleManager.connect(device.address, device.name)
+    }
+
+    fun connectSavedDevice() {
+        bleScanner.stopScan()
+        bleManager.connectSavedDevice()
+    }
+
+    fun forgetSavedDevice() {
+        bleManager.forgetSavedDevice()
+    }
+
+    fun queryHeartRateHistory(): Boolean {
+        return bleManager.queryHeartRateHistory()
     }
 
     fun disconnect() {
-        bleManager.disconnect()
+        bleManager.disconnect(byUser = true)
     }
 
     fun syncTime() {

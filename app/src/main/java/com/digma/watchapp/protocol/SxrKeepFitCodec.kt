@@ -140,6 +140,29 @@ object SxrKeepFitCodec {
     fun buildBindSuccessPacket(): ByteArray = buildBindCommand(BIND_ACTION_SUCCESS)
 
     /**
+     * Converts UTC millis into watch local epoch seconds (`utcSeconds + tzOffsetSeconds`).
+     */
+    fun localEpochSeconds(
+        epochMillis: Long = System.currentTimeMillis(),
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): Long {
+        val epochSeconds = epochMillis / 1000L
+        val offsetSeconds = timeZone.getOffset(epochMillis) / 1000L
+        return (epochSeconds + offsetSeconds).coerceAtLeast(0L)
+    }
+
+    /**
+     * Returns local 00:00:00 epoch seconds for the calendar day of [epochMillis].
+     */
+    fun localMidnightEpochSeconds(
+        epochMillis: Long = System.currentTimeMillis(),
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): Long {
+        val local = localEpochSeconds(epochMillis, timeZone)
+        return (local / 86_400L) * 86_400L
+    }
+
+    /**
      * SXR clock sync (`0x01`): bytes 1..4 = little-endian local wall-clock epoch seconds
      * (`utcEpoch + offsetSeconds`), byte 5 = signed whole hours offset from UTC.
      */
@@ -425,11 +448,26 @@ object SxrKeepFitCodec {
             }
         }
         val ts = u32le(data, 1)
+        val tsShifted = if (data.size >= 6) u32le(data, 2) else 0L
         val bpm = data[5].toInt() and 0xFF
+        val bpm6 = if (data.size >= 7) data[6].toInt() and 0xFF else 0
+
+        if (ts < 1_500_000_000L && tsShifted >= 1_500_000_000L) {
+            if (bpm6 in 25..250) {
+                return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm6, 0))
+            }
+            return SxrEvent.CommandAck(CMD_HEART_RATE_START)
+        }
         if (bpm in 25..250) {
             return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm, 0))
         }
-        if (ts == 0L && bpm == 0) return SxrEvent.CommandError(CMD_HEART_RATE_START)
+        if (ts >= 1_500_000_000L && bpm <= 10 && bpm6 in 25..250) {
+            return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(bpm6, 0))
+        }
+        if (ts == 0L && bpm == 0 && bpm6 == 0) return SxrEvent.CommandError(CMD_HEART_RATE_START)
+        if (ts in 25L..250L && ts != 0xB4L && bpm == 0) {
+            return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(ts.toInt(), 0))
+        }
         val compactBpm = data[2].toInt() and 0xFF
         if (ts in 1L..3L && compactBpm in 25..250) {
             return SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(compactBpm, 0))
@@ -439,21 +477,31 @@ object SxrKeepFitCodec {
 
     private fun parseHeartRateHistory(data: ByteArray): SxrEvent {
         if (data.size < 2) return SxrEvent.Unknown(CMD_HEART_RATE_HISTORY, data)
+        val sub = data[1].toInt() and 0xFF
         if (data.size < 6) {
-            val compactBpm = data[1].toInt() and 0xFF
-            val samples = if (compactBpm in 25..250) listOf(compactBpm) else emptyList()
+            val isMetaFrame = sub == 0xF0 || sub == 0xAA || sub == 0xFF || sub == 0xA0
+            val samples = if (!isMetaFrame && sub in 25..250) listOf(sub) else emptyList()
             return SxrEvent.HeartRateHistory(baseEpochSeconds = 0L, bpmSamples = samples)
         }
-        val baseEpochSeconds = u32le(data, 1)
-        val tailSamples = (5 until data.size)
+
+        val ts1 = u32le(data, 1)
+        val ts2 = u32le(data, 2)
+        if (ts1 < 1_500_000_000L && (sub == 0xF0 || sub == 0xAA || sub == 0xFF)) {
+            return SxrEvent.HeartRateHistory(baseEpochSeconds = 0L, bpmSamples = emptyList())
+        }
+
+        val useShiftedTimestamp = ts1 < 1_500_000_000L && ts2 >= 1_500_000_000L
+        val baseEpochSeconds = if (useShiftedTimestamp) ts2 else ts1
+        val sampleStartIndex = if (useShiftedTimestamp) 6 else 5
+        val tailSamples = (sampleStartIndex until data.size)
             .map { data[it].toInt() and 0xFF }
             .filter { it in 25..250 }
         val samples = if (tailSamples.isNotEmpty()) {
             tailSamples
-        } else if ((data[2].toInt() == 0 && data[3].toInt() == 0 && data[4].toInt() == 0) &&
-            (data[1].toInt() and 0xFF) in 25..250
+        } else if (data[2].toInt() == 0 && data[3].toInt() == 0 && data[4].toInt() == 0 &&
+            sub in 25..250 && sub != 0xA0
         ) {
-            listOf(data[1].toInt() and 0xFF)
+            listOf(sub)
         } else {
             emptyList()
         }
@@ -462,6 +510,11 @@ object SxrKeepFitCodec {
 
     private fun parseHeartRateComplete(data: ByteArray): SxrEvent {
         val tailBpm = if (data.size >= 6) data[5].toInt() and 0xFF else 0
+        val tail6Bpm = if (data.size >= 7 && (u32le(data, 1) >= 1_500_000_000L || tailBpm == 0)) {
+            data[6].toInt() and 0xFF
+        } else {
+            0
+        }
         val compactBpm = if (data.size >= 5 && data[2].toInt() == 0 && data[3].toInt() == 0 && data[4].toInt() == 0) {
             data[1].toInt() and 0xFF
         } else if (data.size in 2..4) {
@@ -471,6 +524,7 @@ object SxrKeepFitCodec {
         }
         val bpm = when {
             tailBpm in 25..250 -> tailBpm
+            tail6Bpm in 25..250 -> tail6Bpm
             compactBpm in 25..250 -> compactBpm
             else -> 0
         }

@@ -516,6 +516,53 @@ class SxrKeepFitCodecTest {
             SxrKeepFitCodec.SxrEvent.HeartRateComplete(0),
             SxrKeepFitCodec.parseIncomingPacket(ByteArray(20).apply { this[0] = 0x27 })
         )
+
+        // 0x14 status-prefixed timestamp at bytes 2..5 (must NOT treat byte[5] as BPM)
+        val statusPrefixedHr = ByteArray(20).apply {
+            this[0] = 0x14
+            this[1] = 0x01
+            putU32Le(this, 2, 1_700_000_500)
+            this[6] = 69
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(69, 0)),
+            SxrKeepFitCodec.parseIncomingPacket(statusPrefixedHr)
+        )
+
+        // 0x14 20-byte padded compact BPM at byte[1] (!= 0xB4)
+        val compact20B = ByteArray(20).apply {
+            this[0] = 0x14
+            this[1] = 77
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.Standard(DigmaProtocolCodec.IncomingPacket.HeartRate(77, 0)),
+            SxrKeepFitCodec.parseIncomingPacket(compact20B)
+        )
+
+        // 0x16 metadata control frames (0xF0 / 0xAA / 0xFF) must NOT produce bogus samples
+        val metaHeader = ByteArray(20).apply {
+            this[0] = 0x16
+            this[1] = 0xF0.toByte()
+            this[2] = 3
+            this[6] = 99 // metadata payload, not BPM
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.HeartRateHistory(0L, emptyList()),
+            SxrKeepFitCodec.parseIncomingPacket(metaHeader)
+        )
+
+        // 0x16 status-prefixed timestamp at bytes 2..5
+        val statusPrefixedHistory = ByteArray(20).apply {
+            this[0] = 0x16
+            this[1] = 0x00
+            putU32Le(this, 2, 1_700_000_123)
+            this[6] = 64
+            this[7] = 67
+        }
+        assertEquals(
+            SxrKeepFitCodec.SxrEvent.HeartRateHistory(1_700_000_123L, listOf(64, 67)),
+            SxrKeepFitCodec.parseIncomingPacket(statusPrefixedHistory)
+        )
     }
 
     private fun decodeNullTerminatedUtf8(frame: ByteArray, offset: Int): String {

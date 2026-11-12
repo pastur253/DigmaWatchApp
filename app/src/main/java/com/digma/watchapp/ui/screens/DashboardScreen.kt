@@ -33,6 +33,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -73,8 +74,11 @@ fun DashboardScreen(
     val metrics by viewModel.healthMetrics.collectAsState()
     val heartRateHistory by viewModel.heartRateHistory.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
+    val savedDevice by viewModel.savedDevice.collectAsState()
+    val isAutoReconnecting by viewModel.isAutoReconnecting.collectAsState()
 
     val isConnected = connectionState is BleConnectionState.Connected
+    val isConnectingOrReconnecting = connectionState is BleConnectionState.Connecting || isAutoReconnecting
     val scrollState = rememberScrollState()
 
     PullToRefreshBox(
@@ -109,18 +113,24 @@ fun DashboardScreen(
                                 .size(12.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    when (connectionState) {
-                                        is BleConnectionState.Connected -> StatusConnected
-                                        is BleConnectionState.Connecting -> StatusConnecting
+                                    when {
+                                        connectionState is BleConnectionState.Connected -> StatusConnected
+                                        isConnectingOrReconnecting -> StatusConnecting
                                         else -> StatusDisconnected
                                     }
                                 )
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = when (connectionState) {
-                                is BleConnectionState.Connected -> (connectionState as BleConnectionState.Connected).deviceName
-                                is BleConnectionState.Connecting -> "Подключение..."
+                            text = when {
+                                connectionState is BleConnectionState.Connected ->
+                                    (connectionState as BleConnectionState.Connected).deviceName
+                                connectionState is BleConnectionState.Connecting ->
+                                    "Подключение: ${(connectionState as BleConnectionState.Connecting).deviceName}"
+                                isAutoReconnecting && savedDevice != null ->
+                                    "Переподключение к ${savedDevice!!.name}..."
+                                savedDevice != null ->
+                                    "${savedDevice!!.name} (не в сети)"
                                 else -> "Часы не подключены"
                             },
                             fontWeight = FontWeight.Bold,
@@ -149,14 +159,57 @@ fun DashboardScreen(
 
                 if (!isConnected) {
                     Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = onNavigateToScan,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
-                    ) {
-                        Icon(Icons.Default.Watch, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Найти и подключить часы", color = Color.Black)
+                    when {
+                        isConnectingOrReconnecting -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = { viewModel.disconnect() },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Отменить", color = MaterialTheme.colorScheme.onSurface)
+                                }
+                                Button(
+                                    onClick = onNavigateToScan,
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                                ) {
+                                    Text("Поиск", color = Color.Black)
+                                }
+                            }
+                        }
+                        savedDevice != null -> {
+                            Button(
+                                onClick = { viewModel.connectSavedDevice() },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                            ) {
+                                Icon(Icons.Default.Watch, contentDescription = null, tint = Color.Black)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Подключить ${savedDevice!!.name}", color = Color.Black)
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedButton(
+                                onClick = onNavigateToScan,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Выбрать другие часы", color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                        else -> {
+                            Button(
+                                onClick = onNavigateToScan,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                            ) {
+                                Icon(Icons.Default.Watch, contentDescription = null, tint = Color.Black)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Найти и подключить часы", color = Color.Black)
+                            }
+                        }
                     }
                 } else {
                     Spacer(modifier = Modifier.height(8.dp))
@@ -281,18 +334,41 @@ fun DashboardScreen(
                     }
 
                     if (isConnected) {
-                        Button(
-                            onClick = { viewModel.toggleHeartRate() },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (metrics.isMeasuringHeartRate) HeartRateRed else PrimaryCyan
-                            )
-                        ) {
-                            Text(
-                                text = if (metrics.isMeasuringHeartRate) "Стоп" else "Замер",
-                                color = Color.Black
-                            )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!metrics.isMeasuringHeartRate) {
+                                IconButton(
+                                    onClick = { viewModel.queryHeartRateHistory() },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Синхронизировать пульс",
+                                        tint = PrimaryCyan
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = { viewModel.toggleHeartRate() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (metrics.isMeasuringHeartRate) HeartRateRed else PrimaryCyan
+                                )
+                            ) {
+                                Text(
+                                    text = if (metrics.isMeasuringHeartRate) "Стоп" else "Замер",
+                                    color = Color.Black
+                                )
+                            }
                         }
                     }
+                }
+
+                if (metrics.isMeasuringHeartRate) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Идёт замер пульса (держите часы плотно на запястье)...",
+                        fontSize = 12.sp,
+                        color = PrimaryCyan
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

@@ -37,7 +37,9 @@ class NotificationCollectorService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         _isListenerConnected.value = true
-        DigmaApp.instance.bleManager.logDiagnostic("Сервис уведомлений Android подключен")
+        val bleManager = DigmaApp.instance.bleManager
+        bleManager.logDiagnostic("Сервис уведомлений Android подключен")
+        bleManager.connectSavedDeviceIfNeeded()
     }
 
     override fun onListenerDisconnected() {
