@@ -9,6 +9,7 @@ import android.provider.Settings
 import com.digma.watchapp.ble.BleManager
 import com.digma.watchapp.ble.BleScanner
 import com.digma.watchapp.model.WatchSettings
+import com.digma.watchapp.service.NotificationCollectorService
 import com.digma.watchapp.update.UpdateManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +54,10 @@ class DigmaApp : Application() {
         updateManager = UpdateManager(this)
 
         createNotificationChannels()
+
+        if (isNotificationListenerEnabled()) {
+            NotificationCollectorService.requestRebindIfEnabled(this)
+        }
     }
 
     fun updateSettings(newSettings: WatchSettings) {

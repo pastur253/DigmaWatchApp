@@ -53,11 +53,12 @@ object NotificationRelayPolicy {
         if (pkg.isEmpty() || pkg == ownPackageName) {
             return Decision.Skip("собственное уведомление", logToDiagnostics = false)
         }
-        if (isOngoing) {
-            return Decision.Skip("постоянное фоновое уведомление", logToDiagnostics = false)
-        }
 
         val type = classifyNotificationType(pkg, category)
+        // Incoming call notifications (Dialer/Telecom/VoIP) typically carry FLAG_ONGOING_EVENT.
+        if (isOngoing && type != DigmaProtocolCodec.NotificationType.CALL) {
+            return Decision.Skip("постоянное фоновое уведомление", logToDiagnostics = false)
+        }
         val typeAllowed = when (type) {
             DigmaProtocolCodec.NotificationType.CALL -> {
                 if (!settings.forwardCalls) {

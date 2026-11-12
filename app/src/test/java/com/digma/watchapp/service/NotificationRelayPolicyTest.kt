@@ -80,6 +80,19 @@ class NotificationRelayPolicyTest {
             settings = WatchSettings()
         )
         assertTrue(ongoing is NotificationRelayPolicy.Decision.Skip)
+
+        val ongoingCall = NotificationRelayPolicy.evaluateDecision(
+            packageName = "com.android.dialer",
+            ownPackageName = "com.digma.watchapp",
+            category = NotificationRelayPolicy.CATEGORY_CALL,
+            isOngoing = true,
+            isGroupSummary = false,
+            settings = WatchSettings()
+        )
+        assertEquals(
+            NotificationRelayPolicy.Decision.Forward(DigmaProtocolCodec.NotificationType.CALL),
+            ongoingCall
+        )
     }
 
     @Test

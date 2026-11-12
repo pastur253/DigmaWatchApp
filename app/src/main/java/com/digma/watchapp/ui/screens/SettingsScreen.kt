@@ -79,6 +79,7 @@ fun SettingsScreen(viewModel: WatchViewModel) {
     val updatePrefs = viewModel.updatePreferences
     var autoCheckUpdates by remember { mutableStateOf(updatePrefs.autoCheckEnabled) }
     var notificationAccessGranted by remember { mutableStateOf(viewModel.isNotificationListenerEnabled()) }
+    val notificationListenerConnected by viewModel.isNotificationListenerConnected.collectAsState()
     var customPackageInput by remember { mutableStateOf("") }
 
     DisposableEffect(lifecycleOwner) {
@@ -86,6 +87,9 @@ fun SettingsScreen(viewModel: WatchViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationAccessGranted = viewModel.isNotificationListenerEnabled()
+                if (notificationAccessGranted && !viewModel.isNotificationListenerConnected.value) {
+                    viewModel.requestNotificationListenerRebind()
+                }
             }
         }
         lifecycle?.addObserver(observer)
@@ -116,35 +120,56 @@ fun SettingsScreen(viewModel: WatchViewModel) {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
+                val serviceReady = notificationAccessGranted && notificationListenerConnected
+                val statusColor = when {
+                    serviceReady -> StatusConnected
+                    notificationAccessGranted -> StatusConnecting
+                    else -> StatusConnecting
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Default.Notifications,
                         contentDescription = null,
-                        tint = if (notificationAccessGranted) StatusConnected else StatusConnecting
+                        tint = statusColor
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (notificationAccessGranted) {
-                            "Доступ к уведомлениям выдан"
-                        } else {
-                            "Требуется доступ к уведомлениям"
+                        text = when {
+                            serviceReady -> "Служба уведомлений активна"
+                            notificationAccessGranted -> "Доступ выдан, но служба не привязана"
+                            else -> "Требуется доступ к уведомлениям"
                         },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (notificationAccessGranted) StatusConnected else StatusConnecting
+                        color = statusColor
                     )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = if (notificationAccessGranted) {
-                        "Android разрешил чтение уведомлений. Сообщения из мессенджеров будут автоматически пересылаться на часы."
-                    } else {
-                        "Для пересылки сообщений из exteraGram, Telegram и других мессенджеров на экран часов разрешите доступ к уведомлениям в системе Android."
+                    text = when {
+                        serviceReady ->
+                            "Android разрешил чтение уведомлений и подключил службу. Сообщения будут автоматически пересылаться на часы."
+                        notificationAccessGranted ->
+                            "Галочка в настройках включена, но Android ещё не подключил службу (часто бывает после обновления APK). Нажмите «Переподключить службу» или выключите и снова включите доступ в настройках."
+                        else ->
+                            "Для пересылки сообщений из exteraGram, Telegram и других мессенджеров разрешите доступ к уведомлениям в системе Android. На Android 13+ может потребоваться разрешить «Ограниченные настройки» в «О приложении»."
                     },
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
+                if (notificationAccessGranted && !notificationListenerConnected) {
+                    Button(
+                        onClick = { viewModel.requestNotificationListenerRebind() },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.Black)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Переподключить службу", color = Color.Black, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 OutlinedButton(
                     onClick = {
                         val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)

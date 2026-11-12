@@ -35,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.core.content.ContextCompat
+import com.digma.watchapp.DigmaApp
+import com.digma.watchapp.service.NotificationCollectorService
 import com.digma.watchapp.service.WatchSyncService
 import com.digma.watchapp.ui.dialogs.UpdateDialog
 import com.digma.watchapp.ui.screens.DashboardScreen
@@ -106,6 +108,15 @@ class MainActivity : ComponentActivity() {
                     onRetry = { viewModel.checkForUpdates(isManual = true) }
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (DigmaApp.instance.isNotificationListenerEnabled() &&
+            !NotificationCollectorService.isListenerConnected.value
+        ) {
+            NotificationCollectorService.requestRebindIfEnabled(this)
         }
     }
 

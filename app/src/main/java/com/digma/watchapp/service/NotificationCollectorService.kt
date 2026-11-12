@@ -1,6 +1,9 @@
 package com.digma.watchapp.service
 
 import android.app.Notification
+import android.app.Person
+import android.content.ComponentName
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
@@ -8,21 +11,45 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.digma.watchapp.DigmaApp
 import com.digma.watchapp.ble.BleConnectionState
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class NotificationCollectorService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "NotifCollector"
+
+        private val _isListenerConnected = MutableStateFlow(false)
+        val isListenerConnected: StateFlow<Boolean> = _isListenerConnected.asStateFlow()
+
+        fun requestRebindIfEnabled(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    requestRebind(ComponentName(context, NotificationCollectorService::class.java))
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to request NotificationListenerService rebind", e)
+                }
+            }
+        }
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        _isListenerConnected.value = true
         DigmaApp.instance.bleManager.logDiagnostic("Сервис уведомлений Android подключен")
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        _isListenerConnected.value = false
+        DigmaApp.instance.bleManager.logDiagnostic("Сервис уведомлений Android отключен системой")
         Log.w(TAG, "NotificationListenerService disconnected")
+    }
+
+    override fun onDestroy() {
+        _isListenerConnected.value = false
+        super.onDestroy()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -89,7 +116,16 @@ class NotificationCollectorService : NotificationListenerService() {
 
         val lastBundle = rawMessages.lastOrNull() as? Bundle ?: return null to null
         val text = lastBundle.getCharSequence("text")
+        val personName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            lastBundle.getParcelable("sender_person", Person::class.java)?.name
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            (lastBundle.getParcelable("sender_person") as? Person)?.name
+        } else {
+            null
+        }
         val sender = lastBundle.getCharSequence("sender")
+            ?: personName
             ?: lastBundle.getBundle("sender_person")?.getCharSequence("name")
         return sender to text
     }

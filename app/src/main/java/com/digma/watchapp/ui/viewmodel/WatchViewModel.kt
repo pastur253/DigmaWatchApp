@@ -8,6 +8,7 @@ import com.digma.watchapp.model.HealthMetrics
 import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.model.WatchSettings
 import com.digma.watchapp.protocol.DigmaProtocolCodec
+import com.digma.watchapp.service.NotificationCollectorService
 import com.digma.watchapp.update.ReleaseInfo
 import com.digma.watchapp.update.UpdateInstaller
 import com.digma.watchapp.update.UpdatePreferences
@@ -38,6 +39,7 @@ class WatchViewModel : ViewModel() {
 
     val updateState: StateFlow<UpdateState> = updateManager.updateState
     val updatePreferences: UpdatePreferences = updateManager.preferences
+    val isNotificationListenerConnected: StateFlow<Boolean> = NotificationCollectorService.isListenerConnected
 
     fun setProtocolMode(mode: WatchProtocolMode) {
         bleManager.setProtocolMode(mode)
@@ -126,6 +128,12 @@ class WatchViewModel : ViewModel() {
     }
 
     fun isNotificationListenerEnabled(): Boolean = app.isNotificationListenerEnabled()
+
+    fun requestNotificationListenerRebind() {
+        if (app.isNotificationListenerEnabled()) {
+            NotificationCollectorService.requestRebindIfEnabled(app)
+        }
+    }
 
     fun sendTestNotification(title: String, message: String) {
         bleManager.sendNotification(
