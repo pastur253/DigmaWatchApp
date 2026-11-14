@@ -19,8 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -108,7 +108,7 @@ fun ScanScreen(viewModel: WatchViewModel) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Стоп", color = Color.White)
                 } else {
-                    Icon(Icons.Default.BluetoothSearching, contentDescription = null, tint = Color.Black)
+                    Icon(Icons.AutoMirrored.Filled.BluetoothSearching, contentDescription = null, tint = Color.Black)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Поиск", color = Color.Black)
                 }

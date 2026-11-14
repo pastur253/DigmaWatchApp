@@ -12,12 +12,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,17 +29,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Watch
@@ -70,6 +72,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -246,14 +249,27 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                     SettingSwitchRow(
                         title = "Отключение по графику (тихие часы)",
                         subtitle = if (settings.quietHoursEnabled) {
-                            String.format(
-                                Locale.US,
-                                "Не отправлять на часы с %02d:%02d до %02d:%02d",
-                                settings.quietHoursStartHour,
-                                settings.quietHoursStartMinute,
-                                settings.quietHoursEndHour,
-                                settings.quietHoursEndMinute
-                            )
+                            if (settings.is24HourFormat) {
+                                String.format(
+                                    Locale.US,
+                                    "Не отправлять на часы с %02d:%02d до %02d:%02d",
+                                    settings.quietHoursStartHour,
+                                    settings.quietHoursStartMinute,
+                                    settings.quietHoursEndHour,
+                                    settings.quietHoursEndMinute
+                                )
+                            } else {
+                                val startAmPm = if (settings.quietHoursStartHour < 12) "AM" else "PM"
+                                val startH = when (val rem = settings.quietHoursStartHour % 12) { 0 -> 12 else -> rem }
+                                val endAmPm = if (settings.quietHoursEndHour < 12) "AM" else "PM"
+                                val endH = when (val rem = settings.quietHoursEndHour % 12) { 0 -> 12 else -> rem }
+                                String.format(
+                                    Locale.US,
+                                    "Не отправлять на часы с %d:%02d %s до %d:%02d %s",
+                                    startH, settings.quietHoursStartMinute, startAmPm,
+                                    endH, settings.quietHoursEndMinute, endAmPm
+                                )
+                            }
                         } else {
                             "Не беспокоить на часах в заданное время"
                         },
@@ -357,7 +373,11 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                                 Icon(Icons.Default.Apps, contentDescription = null, tint = Color.Black)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Выбрать из установленных приложений (${settings.allowedPackages.size})",
+                                    text = if (settings.allowedPackages.isEmpty()) {
+                                        "Выбрать приложения для часов"
+                                    } else {
+                                        "Выбрать приложения (${settings.allowedPackages.size})"
+                                    },
                                     color = Color.Black,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -424,35 +444,67 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                                 .filter { it !in presetPackages }
                                 .sorted()
 
-                            customPackages.forEach { pkg ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = pkg,
-                                        fontSize = 12.sp,
-                                        color = PrimaryCyan,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    IconButton(
-                                        onClick = {
-                                            viewModel.updateSettings(
-                                                settings.copy(allowedPackages = settings.allowedPackages - pkg)
+                            if (customPackages.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Дополнительно выбрано (${customPackages.size}):",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                val displayedCustom = if (customPackages.size <= 5) customPackages else customPackages.take(4)
+                                displayedCustom.forEach { pkg ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = pkg,
+                                            fontSize = 12.sp,
+                                            color = PrimaryCyan,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                viewModel.updateSettings(
+                                                    settings.copy(allowedPackages = settings.allowedPackages - pkg)
+                                                )
+                                            }
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Close,
+                                                contentDescription = "Удалить $pkg",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
+                                    }
+                                }
+                                if (customPackages.size > 5) {
+                                    val remaining = customPackages.size - 4
+                                    TextButton(
+                                        onClick = {
+                                            viewModel.loadInstalledApps()
+                                            showAppPickerDialog = true
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Удалить $pkg",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        Text(
+                                            text = "И еще $remaining прил. (настроить в диалоге выбора)",
+                                            fontSize = 12.sp,
+                                            color = PrimaryCyan
                                         )
                                     }
                                 }
                             }
+
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Добавить пакет вручную:",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -495,7 +547,7 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                     ) {
-                        Icon(Icons.Default.Send, contentDescription = null, tint = PrimaryCyan)
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = PrimaryCyan)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Отправить тестовое уведомление", color = MaterialTheme.colorScheme.onSurface)
                     }
@@ -606,7 +658,7 @@ fun SettingsScreen(viewModel: WatchViewModel) {
                         },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.OpenInNew, contentDescription = null, tint = PrimaryCyan)
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, tint = PrimaryCyan)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("GitHub", color = PrimaryCyan)
                     }
@@ -688,10 +740,19 @@ fun TimePickerField(
     onTimeSelected: (Int, Int) -> Unit
 ) {
     val context = LocalContext.current
-    val formattedTime = String.format(Locale.US, "%02d:%02d", hour, minute)
+    val formattedTime = if (is24Hour) {
+        String.format(Locale.US, "%02d:%02d", hour, minute)
+    } else {
+        val amPm = if (hour < 12) "AM" else "PM"
+        val h = when (val rem = hour % 12) {
+            0 -> 12
+            else -> rem
+        }
+        String.format(Locale.US, "%d:%02d %s", h, minute, amPm)
+    }
 
     Card(
-        modifier = modifier.clickable {
+        onClick = {
             TimePickerDialog(
                 context,
                 { _, selectedHour, selectedMinute ->
@@ -702,6 +763,7 @@ fun TimePickerField(
                 is24Hour
             ).show()
         },
+        modifier = modifier,
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
@@ -735,8 +797,10 @@ fun TimePickerField(
     }
 }
 
+private val iconBitmapCache = androidx.collection.LruCache<String, ImageBitmap>(200)
+
 @Composable
-fun AppIconImage(drawable: Drawable?, modifier: Modifier = Modifier) {
+fun AppIconImage(packageName: String, drawable: Drawable?, modifier: Modifier = Modifier) {
     if (drawable == null) {
         Box(
             modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
@@ -745,22 +809,31 @@ fun AppIconImage(drawable: Drawable?, modifier: Modifier = Modifier) {
             Icon(
                 Icons.Default.Apps,
                 contentDescription = null,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(20.dp),
                 tint = PrimaryCyan
             )
         }
         return
     }
-    val bitmap = remember(drawable) {
-        try {
-            drawable.toBitmap(width = 72, height = 72).asImageBitmap()
-        } catch (_: Exception) {
-            null
+
+    val cached = remember(packageName) { iconBitmapCache.get(packageName) }
+    var bitmap by remember(packageName) { mutableStateOf(cached) }
+
+    if (bitmap == null) {
+        bitmap = remember(packageName, drawable) {
+            try {
+                val bmp = drawable.toBitmap(width = 72, height = 72).asImageBitmap()
+                iconBitmapCache.put(packageName, bmp)
+                bmp
+            } catch (_: Exception) {
+                null
+            }
         }
     }
+
     if (bitmap != null) {
         Image(
-            bitmap = bitmap,
+            bitmap = bitmap!!,
             contentDescription = null,
             modifier = modifier
         )
@@ -772,7 +845,7 @@ fun AppIconImage(drawable: Drawable?, modifier: Modifier = Modifier) {
             Icon(
                 Icons.Default.Apps,
                 contentDescription = null,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(20.dp),
                 tint = PrimaryCyan
             )
         }
@@ -817,6 +890,7 @@ fun AppPickerDialog(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp)
+                    .imePadding()
             ) {
                 // Header
                 Row(
@@ -863,50 +937,80 @@ fun AppPickerDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Action row: Chips & Select/Clear
+                // Filter Chips (equal width)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = !showOnlySelected,
+                        onClick = { showOnlySelected = false },
+                        label = {
+                            Text(
+                                text = "Все (${installedApps.size})",
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = PrimaryCyan.copy(alpha = 0.2f),
+                            selectedLabelColor = PrimaryCyan
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = showOnlySelected,
+                        onClick = { showOnlySelected = true },
+                        label = {
+                            Text(
+                                text = "Выбранные (${allowedPackages.size})",
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = PrimaryCyan.copy(alpha = 0.2f),
+                            selectedLabelColor = PrimaryCyan
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Action row: Shown count & Select/Clear
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = !showOnlySelected,
-                            onClick = { showOnlySelected = false },
-                            label = { Text("Все (${installedApps.size})", fontSize = 11.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = PrimaryCyan.copy(alpha = 0.2f),
-                                selectedLabelColor = PrimaryCyan
-                            )
-                        )
-                        FilterChip(
-                            selected = showOnlySelected,
-                            onClick = { showOnlySelected = true },
-                            label = { Text("Выбранные (${allowedPackages.size})", fontSize = 11.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = PrimaryCyan.copy(alpha = 0.2f),
-                                selectedLabelColor = PrimaryCyan
-                            )
-                        )
-                    }
+                    Text(
+                        text = if (filteredApps.isNotEmpty()) "Показано: ${filteredApps.size}" else "",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(
                             onClick = {
                                 val allVisible = filteredApps.map { it.packageName }.toSet()
                                 onSelectAll(allowedPackages + allVisible)
-                            }
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("Все", fontSize = 11.sp, color = PrimaryCyan)
+                            Text("Выбрать все", fontSize = 12.sp, color = PrimaryCyan)
                         }
                         TextButton(
-                            onClick = onClearAll
+                            onClick = onClearAll,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("Снять", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Снять выбор", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // App list
                 if (isLoading) {
@@ -957,6 +1061,7 @@ fun AppPickerDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 AppIconImage(
+                                    packageName = app.packageName,
                                     drawable = app.icon,
                                     modifier = Modifier
                                         .size(36.dp)

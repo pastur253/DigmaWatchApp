@@ -18,8 +18,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.Refresh
@@ -259,7 +259,7 @@ fun DashboardScreen(
                     )
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            Icons.Default.DirectionsWalk,
+                            Icons.AutoMirrored.Filled.DirectionsWalk,
                             contentDescription = null,
                             tint = StepsOrange,
                             modifier = Modifier.size(28.dp)

@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.automirrored.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
@@ -50,7 +50,7 @@ import com.digma.watchapp.update.UpdateState
 
 enum class NavigationTab(val title: String, val icon: ImageVector) {
     DASHBOARD("Главная", Icons.Default.Dashboard),
-    SCAN("Поиск", Icons.Default.BluetoothSearching),
+    SCAN("Поиск", Icons.AutoMirrored.Filled.BluetoothSearching),
     HISTORY("История", Icons.Default.History),
     SETTINGS("Настройки", Icons.Default.Settings)
 }
