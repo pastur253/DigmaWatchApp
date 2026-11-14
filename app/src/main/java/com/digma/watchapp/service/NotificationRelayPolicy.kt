@@ -2,6 +2,8 @@ package com.digma.watchapp.service
 
 import com.digma.watchapp.model.WatchSettings
 import com.digma.watchapp.protocol.DigmaProtocolCodec
+import java.util.Calendar
+import java.util.Locale
 
 data class NotificationPresetApp(
     val packageName: String,
@@ -44,11 +46,32 @@ object NotificationRelayPolicy {
         category: String?,
         isOngoing: Boolean,
         isGroupSummary: Boolean,
-        settings: WatchSettings
+        settings: WatchSettings,
+        currentTimestampMs: Long = System.currentTimeMillis()
     ): Decision {
         if (!settings.notificationsEnabled) {
             return Decision.Skip("уведомления выключены", logToDiagnostics = false)
         }
+
+        if (settings.quietHoursEnabled) {
+            val cal = Calendar.getInstance().apply { timeInMillis = currentTimestampMs }
+            val hour = cal.get(Calendar.HOUR_OF_DAY)
+            val minute = cal.get(Calendar.MINUTE)
+            if (isQuietHoursActive(
+                    currentHour = hour,
+                    currentMinute = minute,
+                    startHour = settings.quietHoursStartHour,
+                    startMinute = settings.quietHoursStartMinute,
+                    endHour = settings.quietHoursEndHour,
+                    endMinute = settings.quietHoursEndMinute
+                )
+            ) {
+                val startStr = String.format(Locale.US, "%02d:%02d", settings.quietHoursStartHour, settings.quietHoursStartMinute)
+                val endStr = String.format(Locale.US, "%02d:%02d", settings.quietHoursEndHour, settings.quietHoursEndMinute)
+                return Decision.Skip("тихие часы по графику ($startStr–$endStr)", logToDiagnostics = true)
+            }
+        }
+
         val pkg = packageName?.trim().orEmpty()
         if (pkg.isEmpty() || pkg == ownPackageName) {
             return Decision.Skip("собственное уведомление", logToDiagnostics = false)
@@ -89,6 +112,27 @@ object NotificationRelayPolicy {
             return Decision.Skip("групповая сводка ($pkg)", logToDiagnostics = true)
         }
         return if (typeAllowed) Decision.Forward(type) else Decision.Skip("неподдерживаемый тип", logToDiagnostics = false)
+    }
+
+    fun isQuietHoursActive(
+        currentHour: Int,
+        currentMinute: Int,
+        startHour: Int,
+        startMinute: Int,
+        endHour: Int,
+        endMinute: Int
+    ): Boolean {
+        val currentMins = currentHour * 60 + currentMinute
+        val startMins = startHour * 60 + startMinute
+        val endMins = endHour * 60 + endMinute
+
+        if (startMins == endMins) return false
+
+        return if (startMins < endMins) {
+            currentMins in startMins until endMins
+        } else {
+            currentMins >= startMins || currentMins < endMins
+        }
     }
 
     fun classifyNotificationType(

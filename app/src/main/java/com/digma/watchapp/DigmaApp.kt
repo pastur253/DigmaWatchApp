@@ -29,6 +29,11 @@ class DigmaApp : Application() {
         private const val KEY_APPS = "forward_apps"
         private const val KEY_ALL_APPS = "forward_all_apps"
         private const val KEY_ALLOWED_PACKAGES = "allowed_packages"
+        private const val KEY_QUIET_HOURS_ENABLED = "quiet_hours_enabled"
+        private const val KEY_QUIET_HOURS_START_H = "quiet_hours_start_h"
+        private const val KEY_QUIET_HOURS_START_M = "quiet_hours_start_m"
+        private const val KEY_QUIET_HOURS_END_H = "quiet_hours_end_h"
+        private const val KEY_QUIET_HOURS_END_M = "quiet_hours_end_m"
         lateinit var instance: DigmaApp
             private set
     }
@@ -93,7 +98,12 @@ class DigmaApp : Application() {
             forwardSms = prefs.getBoolean(KEY_SMS, defaults.forwardSms),
             forwardApps = prefs.getBoolean(KEY_APPS, defaults.forwardApps),
             forwardAllApps = prefs.getBoolean(KEY_ALL_APPS, defaults.forwardAllApps),
-            allowedPackages = savedPackages
+            allowedPackages = savedPackages,
+            quietHoursEnabled = prefs.getBoolean(KEY_QUIET_HOURS_ENABLED, defaults.quietHoursEnabled),
+            quietHoursStartHour = prefs.getInt(KEY_QUIET_HOURS_START_H, defaults.quietHoursStartHour),
+            quietHoursStartMinute = prefs.getInt(KEY_QUIET_HOURS_START_M, defaults.quietHoursStartMinute),
+            quietHoursEndHour = prefs.getInt(KEY_QUIET_HOURS_END_H, defaults.quietHoursEndHour),
+            quietHoursEndMinute = prefs.getInt(KEY_QUIET_HOURS_END_M, defaults.quietHoursEndMinute)
         )
     }
 
@@ -110,6 +120,11 @@ class DigmaApp : Application() {
             .putBoolean(KEY_APPS, settings.forwardApps)
             .putBoolean(KEY_ALL_APPS, settings.forwardAllApps)
             .putStringSet(KEY_ALLOWED_PACKAGES, settings.allowedPackages.toSet())
+            .putBoolean(KEY_QUIET_HOURS_ENABLED, settings.quietHoursEnabled)
+            .putInt(KEY_QUIET_HOURS_START_H, settings.quietHoursStartHour)
+            .putInt(KEY_QUIET_HOURS_START_M, settings.quietHoursStartMinute)
+            .putInt(KEY_QUIET_HOURS_END_H, settings.quietHoursEndHour)
+            .putInt(KEY_QUIET_HOURS_END_M, settings.quietHoursEndMinute)
             .apply()
     }
 

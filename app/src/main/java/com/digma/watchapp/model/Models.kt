@@ -1,5 +1,7 @@
 package com.digma.watchapp.model
 
+import android.graphics.drawable.Drawable
+
 data class WatchDevice(
     val name: String,
     val address: String,
@@ -29,7 +31,12 @@ data class WatchSettings(
     val forwardSms: Boolean = true,
     val forwardApps: Boolean = true,
     val forwardAllApps: Boolean = true,
-    val allowedPackages: Set<String> = DEFAULT_ALLOWED_PACKAGES
+    val allowedPackages: Set<String> = DEFAULT_ALLOWED_PACKAGES,
+    val quietHoursEnabled: Boolean = false,
+    val quietHoursStartHour: Int = 22,
+    val quietHoursStartMinute: Int = 0,
+    val quietHoursEndHour: Int = 7,
+    val quietHoursEndMinute: Int = 0
 ) {
     companion object {
         val DEFAULT_ALLOWED_PACKAGES: Set<String> = setOf(
@@ -44,6 +51,32 @@ data class WatchSettings(
         )
     }
 }
+
+enum class SummaryPeriod(val title: String, val days: Int) {
+    WEEK("За неделю", 7),
+    MONTH("За месяц", 30)
+}
+
+data class ActivityPeriodSummary(
+    val period: SummaryPeriod,
+    val totalSteps: Int = 0,
+    val averageStepsPerDay: Int = 0,
+    val totalCaloriesKcal: Int = 0,
+    val averageCaloriesPerDay: Int = 0,
+    val totalDistanceMeters: Int = 0,
+    val averageDistanceMetersPerDay: Int = 0,
+    val activeDaysCount: Int = 0,
+    val totalDaysCount: Int = 0,
+    val goalReachedDaysCount: Int = 0,
+    val bestDaySteps: Int = 0,
+    val bestDayDate: String = "" // "dd.MM"
+)
+
+data class AppItem(
+    val packageName: String,
+    val appName: String,
+    val icon: Drawable? = null
+)
 
 data class ActivityHistoryItem(
     val timestamp: Long,

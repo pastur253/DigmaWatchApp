@@ -9,7 +9,7 @@
 | Параметр | Значение |
 |---|---|
 | `applicationId` / `namespace` | `com.digma.watchapp` |
-| Текущая версия | `0.1.2` (`versionCode = 11`) |
+| Текущая версия | `0.1.3` (`versionCode = 12`) |
 | Android SDK | `minSdk = 26`, `targetSdk = 35`, `compileSdk = 35` |
 | Стек | Kotlin `2.0.21`, AGP `8.7.3`, Jetpack Compose + Material 3 (BOM `2024.11.00`), Coroutines `1.9.0` |
 | JDK / Gradle | Java `17`, Gradle Wrapper `8.11.1` |
@@ -65,8 +65,8 @@
 
 #### Корневой пакет, модели и локальное хранилище
 - `DigmaApp.kt` — `Application`: хранит `bleManager`, `bleScanner`, `updateManager`, `settings` (`SharedPreferences`), проверяет доступ к уведомлениям (`isNotificationListenerEnabled()`).
-- `model/Models.kt` — data-классы `WatchDevice`, `HealthMetrics`, `WatchSettings` (включая `DEFAULT_ALLOWED_PACKAGES`), `ActivityHistoryItem`, `HeartRateSample`, `HourlyActivityPoint`, `DailyActivityPoint`.
-- `data/HealthHistoryStore.kt` — локальное хранилище истории пульса и почасовой/дневной активности в `SharedPreferences("digma_health_history")` с дедупликацией и хранением за последние 14 дней (до 500 замеров пульса).
+- `model/Models.kt` — data-классы `WatchDevice`, `HealthMetrics`, `WatchSettings` (включая `DEFAULT_ALLOWED_PACKAGES` и тихие часы по графику `quietHours*`), `SummaryPeriod`, `ActivityPeriodSummary`, `AppItem`, `ActivityHistoryItem`, `HeartRateSample`, `HourlyActivityPoint`, `DailyActivityPoint`.
+- `data/HealthHistoryStore.kt` — локальное хранилище истории пульса и активности в `SharedPreferences("digma_health_history")` с дедупликацией, хранением до 60 дней (до 500 замеров пульса) и вычислением сводки за неделю/месяц (`calculateSummary`).
 
 #### `ble/` — Bluetooth Low Energy
 - `ble/BleConnectionState.kt` *(9 строк)* — `sealed class BleConnectionState` (`Disconnected`, `Scanning`, `Connecting`, `Connected`, `Syncing`, `Error`).
@@ -83,16 +83,16 @@
 #### `service/` — Системные и фоновые службы
 - `service/WatchSyncService.kt` *(104 строки)* — `ForegroundService` (`foregroundServiceType="connectedDevice"`), обновляет статусное уведомление и запускает `bleManager.syncAll()` каждые 15 минут.
 - `service/NotificationCollectorService.kt` *(92 строки)* — `NotificationListenerService`, перехватывает уведомления системы и извлекает `MessagingStyle` (`EXTRA_MESSAGES`).
-- `service/NotificationRelayPolicy.kt` *(145 строк)* — чистая бизнес-логика фильтрации (`evaluateDecision`), классификации (`CALL` / `SMS` / `APP_MESSAGE`), списка популярных мессенджеров (`POPULAR_MESSENGERS`) и нормализации текста (`extractContent`, лимиты: 64 символа заголовок, 220 символов тело).
+- `service/NotificationRelayPolicy.kt` — чистая бизнес-логика фильтрации (`evaluateDecision`, включая тихие часы `isQuietHoursActive`), классификации (`CALL` / `SMS` / `APP_MESSAGE`), списка популярных мессенджеров (`POPULAR_MESSENGERS`) и нормализации текста (`extractContent`, лимиты: 64 символа заголовок, 220 символов тело).
 
 #### `ui/` — Интерфейс (Compose + Material 3)
 - `ui/MainActivity.kt` *(177 строк)* — точка входа Activity, запрос runtime-разрешений (BLE, `POST_NOTIFICATIONS`, `REQUEST_INSTALL_PACKAGES`), 4 вкладки (`NavigationTab`: `DASHBOARD`, `SCAN`, `HISTORY`, `SETTINGS`), интеграция `UpdateDialog`.
 - `ui/viewmodel/WatchViewModel.kt` *(135 строк)* — проксирует `StateFlow` и действия между UI, `BleManager`, `BleScanner`, `DigmaApp` и `UpdateManager`.
 - `ui/screens/DashboardScreen.kt` — статус часов, батарея, прогресс шагов/калорий/дистанции, пульс (со спарклайном) и `SpO2`, быстрые действия, pull-to-refresh.
 - `ui/screens/ScanScreen.kt` *(656 строк)* — поиск BLE-устройств, подключение/отключение, выбор `WatchProtocolMode`, просмотр GATT-сервисов, терминал диагностических логов и тестовые кнопки.
-- `ui/screens/HistoryScreen.kt` — графики активности (по часам и по дням) и пульса, сводка активности и управление историей.
+- `ui/screens/HistoryScreen.kt` — графики активности (по часам и по дням) и пульса, интерактивная сводка активности за неделю и за месяц, управление историей.
 - `ui/components/HealthCharts.kt` — Compose Canvas графики `ActivityChartCard`, `HeartRateChartCard` и мини-график `HeartRateSparkline`.
-- `ui/screens/SettingsScreen.kt` *(495 строк)* — настройки часов, доступ к уведомлениям, выбор приложений-мессенджеров / режим «все приложения», тестовое уведомление, блок проверки обновлений.
+- `ui/screens/SettingsScreen.kt` — настройки часов, доступ к уведомлениям, отключение уведомлений по графику (тихие часы), выбор установленных приложений для пересылки через диалог с поиском / режим «все приложения», тестовое уведомление, блок проверки обновлений.
 - `ui/dialogs/UpdateDialog.kt` *(379 строк)* — диалоги наличия обновления, прогресса загрузки, готовности к установке и ошибок.
 - `ui/theme/Color.kt` *(16 строк)* и `ui/theme/Theme.kt` *(44 строки)* — тёмная и светлая цветовые палитры.
 

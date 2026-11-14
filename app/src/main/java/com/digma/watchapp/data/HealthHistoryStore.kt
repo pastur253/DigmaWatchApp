@@ -1,9 +1,11 @@
 package com.digma.watchapp.data
 
 import android.content.Context
+import com.digma.watchapp.model.ActivityPeriodSummary
 import com.digma.watchapp.model.DailyActivityPoint
 import com.digma.watchapp.model.HeartRateSample
 import com.digma.watchapp.model.HourlyActivityPoint
+import com.digma.watchapp.model.SummaryPeriod
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,9 +34,20 @@ class HealthHistoryStore(context: Context) {
     private val _dailyActivity = MutableStateFlow<List<DailyActivityPoint>>(emptyList())
     val dailyActivity: StateFlow<List<DailyActivityPoint>> = _dailyActivity.asStateFlow()
 
+    private val _allDailyActivity = MutableStateFlow<List<DailyActivityPoint>>(emptyList())
+    val allDailyActivity: StateFlow<List<DailyActivityPoint>> = _allDailyActivity.asStateFlow()
+
     init {
         loadFromPrefs()
         publishFlowsLocked()
+    }
+
+    fun getActivitySummary(
+        period: SummaryPeriod,
+        stepGoal: Int,
+        nowMs: Long = System.currentTimeMillis()
+    ): ActivityPeriodSummary {
+        return calculateSummary(_allDailyActivity.value, period.days, stepGoal, nowMs)
     }
 
     fun recordHeartRate(bpm: Int, timestampMs: Long = System.currentTimeMillis()) {
@@ -157,9 +170,11 @@ class HealthHistoryStore(context: Context) {
     private fun publishFlowsLocked() {
         val todayKey = formatDateKey(System.currentTimeMillis())
         val todayRecord = dailyMap[todayKey]
+        val allRecords = dailyMap.values.toList()
         _heartRateHistory.value = hrSamples.toList()
         _hourlyActivity.value = buildHourlyPoints(todayRecord)
-        _dailyActivity.value = buildDailyPoints(dailyMap.values.toList())
+        _dailyActivity.value = buildDailyPoints(allRecords)
+        _allDailyActivity.value = buildAllDailyPoints(allRecords)
     }
 
     private fun trimHeartRateSamplesLocked() {
@@ -277,7 +292,7 @@ class HealthHistoryStore(context: Context) {
         private const val KEY_HR_SAMPLES = "hr_samples"
         private const val KEY_DAILY_RECORDS = "daily_records"
         private const val MAX_HR_SAMPLES = 500
-        private const val MAX_RETENTION_DAYS = 14
+        private const val MAX_RETENTION_DAYS = 60
         private const val DAY_MS = 24 * 60 * 60 * 1000L
         private const val HR_DEDUP_WINDOW_MS = 15_000L
 
@@ -316,6 +331,63 @@ class HealthHistoryStore(context: Context) {
                     distanceMeters = rec.distanceMeters
                 )
             }
+        }
+
+        internal fun buildAllDailyPoints(records: List<DailyRecord>): List<DailyActivityPoint> {
+            val sorted = records.sortedBy { it.dateKey }
+            return sorted.map { rec ->
+                val bucketTotal = rec.bucketMinuteSteps.values.sum()
+                val effectiveSteps = maxOf(rec.lastReportedSteps, bucketTotal)
+                val label = if (rec.dateKey.length == 10) {
+                    "${rec.dateKey.substring(8, 10)}.${rec.dateKey.substring(5, 7)}"
+                } else {
+                    rec.dateKey
+                }
+                DailyActivityPoint(
+                    dateKey = rec.dateKey,
+                    label = label,
+                    steps = effectiveSteps,
+                    caloriesKcal = rec.caloriesKcal,
+                    distanceMeters = rec.distanceMeters
+                )
+            }
+        }
+
+        fun calculateSummary(
+            points: List<DailyActivityPoint>,
+            periodDays: Int,
+            stepGoal: Int,
+            nowMs: Long = System.currentTimeMillis()
+        ): ActivityPeriodSummary {
+            val cutoffDateKey = formatDateKey(nowMs - (periodDays - 1) * DAY_MS)
+            val periodPoints = points.filter { it.dateKey >= cutoffDateKey }
+
+            val totalSteps = periodPoints.sumOf { it.steps }
+            val totalCalories = periodPoints.sumOf { it.caloriesKcal }
+            val totalDistance = periodPoints.sumOf { it.distanceMeters }
+            val activeDays = periodPoints.count { it.steps > 0 }
+            val goalReachedDays = periodPoints.count { it.steps >= stepGoal }
+            val bestDay = periodPoints.maxByOrNull { it.steps }
+
+            val divisor = if (activeDays > 0) activeDays else 1
+            val avgSteps = if (activeDays > 0) totalSteps / divisor else 0
+            val avgCalories = if (activeDays > 0) totalCalories / divisor else 0
+            val avgDistance = if (activeDays > 0) totalDistance / divisor else 0
+
+            return ActivityPeriodSummary(
+                period = if (periodDays <= 7) SummaryPeriod.WEEK else SummaryPeriod.MONTH,
+                totalSteps = totalSteps,
+                averageStepsPerDay = avgSteps,
+                totalCaloriesKcal = totalCalories,
+                averageCaloriesPerDay = avgCalories,
+                totalDistanceMeters = totalDistance,
+                averageDistanceMetersPerDay = avgDistance,
+                activeDaysCount = activeDays,
+                totalDaysCount = periodDays,
+                goalReachedDaysCount = goalReachedDays,
+                bestDaySteps = bestDay?.steps ?: 0,
+                bestDayDate = if (bestDay != null && bestDay.steps > 0) bestDay.label else ""
+            )
         }
 
         internal fun resolveWatchEpochMs(

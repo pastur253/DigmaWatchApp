@@ -121,4 +121,69 @@ class NotificationRelayPolicyTest {
         )
         assertNull(empty)
     }
+
+    @Test
+    fun `isQuietHoursActive detects same-day and overnight windows accurately`() {
+        // Same-day window: 13:00 to 15:00
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(13, 0, 13, 0, 15, 0))
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(14, 30, 13, 0, 15, 0))
+        org.junit.Assert.assertFalse(NotificationRelayPolicy.isQuietHoursActive(12, 59, 13, 0, 15, 0))
+        org.junit.Assert.assertFalse(NotificationRelayPolicy.isQuietHoursActive(15, 0, 13, 0, 15, 0))
+
+        // Overnight window: 22:00 to 07:00
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(22, 0, 22, 0, 7, 0))
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(23, 45, 22, 0, 7, 0))
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(3, 15, 22, 0, 7, 0))
+        assertTrue(NotificationRelayPolicy.isQuietHoursActive(6, 59, 22, 0, 7, 0))
+        org.junit.Assert.assertFalse(NotificationRelayPolicy.isQuietHoursActive(7, 0, 22, 0, 7, 0))
+        org.junit.Assert.assertFalse(NotificationRelayPolicy.isQuietHoursActive(14, 0, 22, 0, 7, 0))
+        org.junit.Assert.assertFalse(NotificationRelayPolicy.isQuietHoursActive(21, 59, 22, 0, 7, 0))
+    }
+
+    @Test
+    fun `evaluateDecision respects quiet hours schedule`() {
+        val quietSettings = WatchSettings(
+            quietHoursEnabled = true,
+            quietHoursStartHour = 22,
+            quietHoursStartMinute = 0,
+            quietHoursEndHour = 7,
+            quietHoursEndMinute = 0
+        )
+
+        // 23:30 local time
+        val calendarDuringQuiet = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 23)
+            set(java.util.Calendar.MINUTE, 30)
+        }
+        val duringQuiet = NotificationRelayPolicy.evaluateDecision(
+            packageName = "org.telegram.messenger",
+            ownPackageName = "com.digma.watchapp",
+            category = "msg",
+            isOngoing = false,
+            isGroupSummary = false,
+            settings = quietSettings,
+            currentTimestampMs = calendarDuringQuiet.timeInMillis
+        )
+        assertTrue(duringQuiet is NotificationRelayPolicy.Decision.Skip)
+        assertTrue((duringQuiet as NotificationRelayPolicy.Decision.Skip).reason.contains("тихие часы"))
+
+        // 14:00 local time (outside quiet hours)
+        val calendarDaytime = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 14)
+            set(java.util.Calendar.MINUTE, 0)
+        }
+        val daytime = NotificationRelayPolicy.evaluateDecision(
+            packageName = "org.telegram.messenger",
+            ownPackageName = "com.digma.watchapp",
+            category = "msg",
+            isOngoing = false,
+            isGroupSummary = false,
+            settings = quietSettings,
+            currentTimestampMs = calendarDaytime.timeInMillis
+        )
+        assertEquals(
+            NotificationRelayPolicy.Decision.Forward(DigmaProtocolCodec.NotificationType.APP_MESSAGE),
+            daytime
+        )
+    }
 }

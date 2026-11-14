@@ -24,10 +24,12 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.digma.watchapp.data.HealthHistoryStore
+import com.digma.watchapp.model.ActivityPeriodSummary
 import com.digma.watchapp.model.DailyActivityPoint
 import com.digma.watchapp.model.HealthMetrics
 import com.digma.watchapp.model.HeartRateSample
 import com.digma.watchapp.model.HourlyActivityPoint
+import com.digma.watchapp.model.SummaryPeriod
 import com.digma.watchapp.model.WatchDevice
 import com.digma.watchapp.protocol.DigmaProtocolCodec
 import com.digma.watchapp.protocol.SxrKeepFitCodec
@@ -233,6 +235,11 @@ class BleManager(private val context: Context) {
     val heartRateHistory: StateFlow<List<HeartRateSample>> = historyStore.heartRateHistory
     val hourlyActivity: StateFlow<List<HourlyActivityPoint>> = historyStore.hourlyActivity
     val dailyActivity: StateFlow<List<DailyActivityPoint>> = historyStore.dailyActivity
+    val allDailyActivity: StateFlow<List<DailyActivityPoint>> = historyStore.allDailyActivity
+
+    fun getActivitySummary(period: SummaryPeriod, stepGoal: Int): ActivityPeriodSummary {
+        return historyStore.getActivitySummary(period, stepGoal)
+    }
 
     fun clearHealthHistory() {
         historyStore.clearAll()
